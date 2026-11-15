@@ -1,5 +1,5 @@
-//! Embeds every SVG part of `assets/ui` (except the composed demo `panel.svg`) in the
-//! binary: writes `$OUT_DIR/parts_gen.rs` with `PARTS: &[(name, uri, bytes)]`, sorted by name.
+//! Generates and embeds the default Graphite SVG parts in the binary. Writes
+//! `$OUT_DIR/parts_gen.rs` with `PARTS: &[(name, uri, bytes)]`, sorted by name.
 
 use std::env;
 use std::fmt::Write as _;
@@ -160,20 +160,18 @@ fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let version = set_version(&manifest);
     embed_windows_resources(&manifest, &version);
-    let dir = manifest.join("../../assets/ui").canonicalize().unwrap();
-    println!("cargo:rerun-if-changed={}", dir.display());
-    let mut names: Vec<String> = fs::read_dir(&dir)
-        .unwrap()
-        .filter_map(|e| {
-            let name = e.unwrap().file_name().into_string().unwrap();
-            let stem = name.strip_suffix(".svg")?;
-            (stem != "panel").then(|| stem.to_string())
-        })
-        .collect();
-    names.sort();
+    // Embed the default skin from its source, independently of a song's drum-sample mod.
+    // OUT_DIR keeps the committed legacy art set reproducible and the source tree clean.
+    let dir = PathBuf::from(env::var("OUT_DIR").unwrap()).join("graphite");
+    fs::create_dir_all(&dir).unwrap();
+    println!("cargo:rerun-if-changed=../orb-ui-art/src");
+    let mut parts = orb_ui_art::graphite::all();
+    parts.sort_by(|a, b| a.name.cmp(&b.name));
     let mut out = String::from("pub static PARTS: &[(&str, &str, &[u8])] = &[\n");
-    for n in &names {
+    for part in parts {
+        let n = &part.name;
         let path = dir.join(format!("{n}.svg"));
+        fs::write(&path, part.to_svg()).unwrap();
         writeln!(
             out,
             "    ({n:?}, \"bytes://orb-ui/{n}.svg\", include_bytes!({:?})),",

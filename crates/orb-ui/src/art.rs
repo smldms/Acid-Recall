@@ -1,4 +1,4 @@
-//! The panel's SVG parts (`assets/ui`), embedded by `build.rs`, and the knob designs.
+//! The default Graphite SVG parts, generated and embedded by `build.rs`, and knob geometry.
 
 include!(concat!(env!("OUT_DIR"), "/parts_gen.rs"));
 
@@ -64,7 +64,7 @@ pub const KNOBS: [KnobDesign; 5] = [
         cy: 15.0,
         ring_r: 13.6,
         ring_w: 1.6,
-        arc: [0xf0, 0x8a, 0x24],
+        arc: crate::palette::KNOB_ARC,
     },
     KnobDesign {
         name: "knob_808_red",
@@ -74,7 +74,7 @@ pub const KNOBS: [KnobDesign; 5] = [
         cy: 6.5,
         ring_r: 5.9,
         ring_w: 0.9,
-        arc: [0xf2, 0xc5, 0x31],
+        arc: crate::palette::KNOB_ARC,
     },
     KnobDesign {
         name: "knob_808_white",
@@ -84,7 +84,7 @@ pub const KNOBS: [KnobDesign; 5] = [
         cy: 6.5,
         ring_r: 5.9,
         ring_w: 0.9,
-        arc: [0xf0, 0x8a, 0x24],
+        arc: crate::palette::KNOB_ARC,
     },
     KnobDesign {
         name: "knob_909",
@@ -94,7 +94,7 @@ pub const KNOBS: [KnobDesign; 5] = [
         cy: 6.0,
         ring_r: 5.4,
         ring_w: 0.9,
-        arc: [0xe2, 0x41, 0x3b],
+        arc: crate::palette::KNOB_ARC,
     },
     KnobDesign {
         name: "knob_22",
@@ -104,7 +104,7 @@ pub const KNOBS: [KnobDesign; 5] = [
         cy: 11.0,
         ring_r: 10.1,
         ring_w: 1.4,
-        arc: [0xff, 0xb0, 0x00],
+        arc: crate::palette::KNOB_ARC,
     },
 ];
 
@@ -149,13 +149,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_embedded_default_is_graphite() {
+        let part = part("bg_tb303").unwrap();
+        let svg = std::str::from_utf8(part.svg).unwrap();
+        assert!(!svg.contains(orb_ui_art::svg::pal::PAPER));
+        assert!(svg.contains(orb_ui_art::graphite::INK));
+    }
+
+    #[test]
     fn knob_designs_match_the_art_generator() {
         for (a, b) in KNOBS.iter().zip(orb_ui_art::parts::KNOBS.iter()) {
             assert_eq!(a.name, b.name);
             assert_eq!((a.w, a.h, a.cx, a.cy), (b.w, b.h, b.cx, b.cy));
             assert_eq!((a.ring_r, a.ring_w), (b.ring_r, b.ring_w));
-            let hex = format!("#{:02x}{:02x}{:02x}", a.arc[0], a.arc[1], a.arc[2]);
-            assert_eq!(hex, b.arc, "{}", a.name);
+            assert_eq!(a.arc, orb_ui_art::graphite::ARC, "{}", a.name);
         }
     }
 

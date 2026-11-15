@@ -483,6 +483,7 @@ impl App {
         // (0x425FAB for a 1.x song, 0x426400 for an RBS song): the old song was closed first
         // (the unsaved prompt is the close's), so this song is its mod's only user
         self.settle(path, opened.source, opened.facts_1x, mod_name, kit);
+        self.generator.clear_undo();
     }
 
     /// Whether the current song's mod has a `Demo.rbs` (the Mods menu's "Demo Song"): never for
@@ -572,6 +573,7 @@ impl App {
             kit,
         };
         self.events_seen = 0;
+        self.arpeggiator.clear_undo();
     }
 
     /// The app's start (`sub_480AA0`, docs/ui_spec.md section 18): the song named on the
@@ -630,6 +632,7 @@ impl App {
     /// Replaces the open song with the start state (`Link::load_new` stops the playing song).
     pub fn new_now(&mut self) {
         self.fresh();
+        self.generator.clear_undo();
     }
 
     /// `sub_426C67` after a song's mod was opened by its only user (word +1088 is 1,
@@ -759,9 +762,13 @@ impl App {
         };
         let out = path.to_path_buf();
         let label = self.doc.name();
+        let sidechain = self.settings.sidechain.engine_config();
+        let closed_hat_level = self.settings.closed_hat_level;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut r = Renderer::new(mods);
+            r.sidechain = sidechain;
+            r.closed_hat_level = closed_hat_level;
             let result = r
                 .render_to_file(
                     &label,
@@ -946,7 +953,7 @@ impl App {
                 Event::Press { .. } => false,
                 Event::Set { id, .. } => !matches!(
                     id.as_str(),
-                    "transport.position" | "transport.bar" | "transport.record"
+                    "transport.position" | "transport.bar" | "transport.record" | "tr909.ch_level"
                 ),
                 _ => true,
             }
@@ -1212,6 +1219,22 @@ impl App {
                             }
                         });
                         ui.menu_button("Options", |ui| {
+                            if item(ui, "Pattern Generator...", None) {
+                                self.generator.open = true;
+                            }
+                            if item(ui, "Kick Sidechain...", None) {
+                                self.sidechain.open = true;
+                            }
+                            if item(ui, "Arpeggiator / TB-303 A...", None) {
+                                self.open_arpeggiator(0);
+                            }
+                            if item(ui, "Arpeggiator / TB-303 B...", None) {
+                                self.open_arpeggiator(1);
+                            }
+                            if item(ui, "MIDI Controller...", None) {
+                                self.midi.open = true;
+                            }
+                            ui.separator();
                             let mut v = self.panel.vintage;
                             if ui.checkbox(&mut v, "Vintage ReBirth Synth Sound").clicked() {
                                 cmd = Some(Cmd::ToggleVintage);

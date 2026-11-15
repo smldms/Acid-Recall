@@ -424,6 +424,12 @@ impl Link {
         &mut self.player
     }
 
+    /// App effects use the same ordered queue and snapshot barrier as panel edits.
+    pub fn effect_command(&mut self, command: Command) {
+        self.backlog.push_back(command);
+        self.flush_marked();
+    }
+
     /// The pattern arrays as the link knows them (the song's, with the panel's edits).
     pub fn patterns(&self) -> &[Vec<u8>; 4] {
         &self.patterns
@@ -474,6 +480,10 @@ impl Link {
             panel.adopt(id, payloads[d as usize][c as usize] as i32);
         }
         let m = &payloads[Device::Mixer as usize];
+        panel.adopt(
+            "tr909.ch_level",
+            payloads[Device::Tr909 as usize][22] as i32,
+        );
         panel.adopt("master.fader", m[0] as i32);
         panel.adopt("mixer.comp_id", m[1] as i32);
         panel.adopt("mixer.pcf_id", m[2] as i32);
@@ -625,6 +635,28 @@ impl Link {
             data: data.to_vec(),
         };
         match e {
+            Event::PatternData {
+                row,
+                pattern,
+                bytes,
+            } => {
+                if *row >= 4 || *pattern >= 32 {
+                    return vec![];
+                }
+                let (_, plen, _) = layout(*row);
+                if bytes.len() != plen {
+                    return vec![];
+                }
+                let at = plen * usize::from(*pattern);
+                let Some(target) = self.patterns[*row].get_mut(at..at + plen) else {
+                    return vec![];
+                };
+                target.copy_from_slice(bytes);
+                let mut data = vec![*pattern];
+                data.extend_from_slice(bytes);
+                let d = ROW_DEVICES[*row];
+                vec![dev(d, header_sub(d) + 2, &data)]
+            }
             Event::Press { id } => match id.as_str() {
                 "transport.play" => vec![Msg::Global { id: 1, value: 1 }],
                 "transport.stop" => vec![Msg::Global { id: 1, value: 0 }],
@@ -952,6 +984,7 @@ impl Link {
         t.recording = s.recording && t.song_mode;
         panel.adopt("transport.shuffle", s.shuffle as i32);
         panel.vintage = s.vintage;
+        panel.adopt("tr909.ch_level", s.closed_hat_level as i32);
         self.saved = s.song_mode.then_some(SavedBlocks {
             blocks: s.saved,
             mixer: s.saved_mixer,

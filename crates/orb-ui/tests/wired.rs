@@ -332,7 +332,13 @@ fn param_controls() -> Vec<(String, Device, u8)> {
 
 /// The controls with no message: UI state, a display, a meter, or sent by other paths (listed in
 /// the test that checks them).
-const OTHER: &[&str] = &["tr808.mod_view", "tr909.flam_button", "tr909.flam"];
+// App-only CH routing is verified through the actual player in tests/sidechain.rs.
+const OTHER: &[&str] = &[
+    "tr808.mod_view",
+    "tr909.flam_button",
+    "tr909.flam",
+    "tr909.ch_level",
+];
 
 /// The live byte index of a device's controller in the snapshot's live block.
 fn live_index(d: Device, ctrl: u8) -> usize {

@@ -22,6 +22,24 @@ fn main() -> ExitCode {
     let explicit_dir = args.next().map(PathBuf::from);
     let dir = explicit_dir.clone().unwrap_or_else(default_dir);
     match cmd.as_str() {
+        "graphite" => {
+            let out = explicit_dir.unwrap_or_else(|| default_dir().join("preview/graphite"));
+            fs::create_dir_all(&out).unwrap();
+            let parts = orb_ui_art::graphite::all();
+            let problems = check_parts(&parts);
+            if !problems.is_empty() {
+                eprintln!("{problems:#?}");
+                return ExitCode::FAILURE;
+            }
+            let svg = orb_ui_art::graphite::panel();
+            fs::write(out.join("panel.svg"), &svg).unwrap();
+            render(&svg, 2)
+                .expect("Graphite panel render")
+                .save_png(out.join("panel.png"))
+                .unwrap();
+            println!("Graphite: {} parts checked at 1x, 2x and 3x", parts.len());
+            ExitCode::SUCCESS
+        }
         "gen" => {
             fs::create_dir_all(&dir).unwrap();
             let files = generate();

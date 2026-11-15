@@ -135,6 +135,10 @@ impl std::fmt::Display for LoadError {
 /// What the UI sends to the newest song (current, or pending: see the crate doc). Each variant
 /// names the engine message it stands for.
 pub enum Command {
+    /// Independent closed-hat level; None preserves the legacy shared control.
+    ClosedHatLevel(Option<u8>),
+    /// Global optional kick ducking, applied to current and pending songs.
+    Sidechain(orb_engine::sidechain::Config),
     /// Song msg 35 `{1,1}`: play (on a pending song, the switch of `sub_1001BE74`).
     Play,
     /// Song msg 35 `{1,0}`: stop, then locate to the start of the bar.
@@ -325,6 +329,9 @@ impl LiveBlock {
 /// What the UI reads back: the current song's state after the last engine call.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Snapshot {
+    pub closed_hat_level: u8,
+    /// Current TB gain reductions, in percent, from the optional sidechain processor.
+    pub sidechain_reduction: [u8; 2],
     /// The frames the engine has rendered (44.1 kHz), a multiple of [`CALL_FRAMES`].
     pub frames: u64,
     /// The songs made current so far (0: the initial empty song).
@@ -401,6 +408,8 @@ pub struct Player {
 
 /// The callback side.
 pub struct Audio {
+    closed_hat_level: Option<u8>,
+    sidechain: orb_engine::sidechain::Config,
     current: Box<Engine>,
     pending: Option<Box<Engine>>,
     commands: rtrb::Consumer<Command>,
@@ -440,6 +449,8 @@ impl Player {
         let (si, so) = triple_buffer::triple_buffer(&Snapshot::default());
         let (ti, to) = triple_buffer::triple_buffer(&Tracks::default());
         let mut audio = Audio {
+            closed_hat_level: None,
+            sidechain: orb_engine::sidechain::Config::default(),
             current,
             pending: None,
             commands: cc,
@@ -652,6 +663,20 @@ impl Audio {
 
     fn apply(&mut self, c: Command) {
         match c {
+            Command::ClosedHatLevel(level) => {
+                self.closed_hat_level = level.map(|v| v.min(127));
+                self.current.frame.devices.channels[3].set_closed_hat_level(self.closed_hat_level);
+                if let Some(pending) = &mut self.pending {
+                    pending.frame.devices.channels[3].set_closed_hat_level(self.closed_hat_level);
+                }
+            }
+            Command::Sidechain(config) => {
+                self.sidechain = config.sanitized();
+                self.current.frame.sidechain.set_config(self.sidechain);
+                if let Some(pending) = &mut self.pending {
+                    pending.frame.sidechain.set_config(self.sidechain);
+                }
+            }
             Command::Play => {
                 if let Some(new) = self.pending.take() {
                     self.switch(new);
@@ -757,7 +782,9 @@ impl Audio {
     /// the current song plays (0x1001BDC7), slot 6 runs on the current song (0x1001BDD0; of it
     /// only the delay's refill of the shared line outlives the song) and the new song becomes
     /// current (`sub_1001BD24`).
-    fn activate(&mut self, new: Box<Engine>) {
+    fn activate(&mut self, mut new: Box<Engine>) {
+        new.frame.devices.channels[3].set_closed_hat_level(self.closed_hat_level);
+        new.frame.sidechain.set_config(self.sidechain);
         if let Some(old) = self.pending.take() {
             self.throw(Garbage::Engine(old));
         }
@@ -792,6 +819,8 @@ impl Audio {
         let f = &e.frame;
         let g = &f.seq.globals;
         let s = self.snapshot.input_buffer_mut();
+        s.closed_hat_level = f.devices.channels[3].closed_hat_level();
+        s.sidechain_reduction = f.sidechain.reduction();
         s.frames = self.frames;
         s.generation = self.generation;
         s.pending = self.pending.is_some();

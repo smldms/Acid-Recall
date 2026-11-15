@@ -253,6 +253,15 @@ pub trait SongDevice: Send {
 
 /// A mixer channel's sound source: TB-303 #1, #2, TR-808 or TR-909.
 pub trait ChannelDevice: SongDevice {
+    /// Optional extension: a separate closed-hat level, None for the legacy shared control.
+    fn set_closed_hat_level(&mut self, _level: Option<u8>) {}
+    fn closed_hat_level(&self) -> u8 {
+        100
+    }
+    /// Optional extension: the number of kick triggers, for the default sidechain tool.
+    fn kick_count(&self) -> u64 {
+        0
+    }
     /// Vtable slot 14 (0x10013580): render one block into `bus`, overwriting all of it.
     fn process(&mut self, bus: &mut Block, ctx: &BlockContext);
     /// Not a slot: the pattern the device plays (the 303's `+0xC94`, the 808's `+0x18D0`, the
@@ -775,6 +784,8 @@ pub struct EngineState {
 
 /// The mixer and its devices: everything one block touches.
 pub struct Frame {
+    /// Optional TB ducking; the default state preserves the original rendering exactly.
+    pub sidechain: crate::sidechain::Ducker,
     pub state: MixerState,
     /// `song+0x16D`, the sound-model byte non-zero: the pan-dependent send.
     pub vintage: bool,
@@ -833,6 +844,7 @@ fn meter_byte(x: f64, full: bool) -> u8 {
 impl Frame {
     pub fn new(tables: Arc<Tables>, devices: Devices) -> Self {
         Frame {
+            sidechain: crate::sidechain::Ducker::default(),
             state: MixerState::default(),
             vintage: false,
             devices,
@@ -925,6 +937,15 @@ impl Frame {
             // 0x1001F3B3: the tempo (globals +4) the step loop passes, into its local there
             self.stack_word = Some(self.seq.globals.tempo as i32);
         }
+        let kicks = [
+            self.devices.channels[2].kick_count(),
+            self.devices.channels[3].kick_count(),
+        ];
+        let audible = std::array::from_fn(|i| {
+            let channel = self.devices.mixer.live.channels[i + 2];
+            channel.enabled != 0 && channel.level != 0
+        });
+        let duck = self.sidechain.gains(kicks, audible);
         let mi = (self.state.meter_index + METER_STEP) & 63;
         self.state.meter_index = mi;
         let mi = mi as usize;
@@ -959,6 +980,15 @@ impl Frame {
                         return Err(f);
                     }
                     self.stack_word = ins.stack_word(self.stack_word);
+                }
+            }
+            // The optional tool ducks the TB bus after its inserts, before dry mixing and
+            // new delay sends. Unity is skipped, retaining the original bypass arithmetic.
+            if c < 2 {
+                for (sample, &gain) in bus.iter_mut().zip(&duck[c]) {
+                    if gain != 1.0 {
+                        *sample = st(*sample as f64 * gain as f64);
+                    }
                 }
             }
             // 0x100135FA: the channel's peak meter

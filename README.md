@@ -21,6 +21,26 @@ and Windows.
 
 ## Features
 
+- **Kick Sidechain and CH level:** kick-triggered TB ducking with separate depths and a
+  return control, plus an independent MIDI-learnable 909 Closed Hat LEVEL knob.
+  Click **SC** or open **Options > Kick Sidechain...**. See [the mix extensions](docs/sidechain.md).
+- **Graphite interface:** a built-in black and gray vector rack, dark knobs with white
+  pointers, restrained active-state accents and grouped step pads. No external mod needed.
+  See [Graphite](docs/graphite.md).
+- **Independent TB arpeggiators:** chord or existing pattern notes, six directions, octaves,
+  rhythm, accents and slides, with a visual preview and separate Undo for each TB.
+  Click **ARP** on a TB. See the [arpeggiator guide](docs/arpeggiator.md).
+- **Musical Random:** RND on each machine, key/scale-guided TB phrases, linked TB call/response,
+  structured TR grooves and Undo Random. Open **Options > Pattern Generator...**.
+  See the [pattern generator guide](docs/pattern-generator.md).
+- **Portable MIDI routing:** import/export learned assignments and soft takeover as `.toml`
+  files from **Options > MIDI Controller...**.
+- **Windows MIDI controller input:** MIDI Learn, saved CC/channel assignments and soft takeover
+  for the two 303s, both drum machines, mixer and existing effects. Open
+  **Options > MIDI Controller...**. See the [UC-33e setup guide](docs/midi-controller.md).
+  Download the Windows MIDI preview from
+  [MIDI Windows preview builds](https://github.com/smldms/openrb-338/actions/workflows/midi-windows.yml):
+  open a successful run, then download its **OpenRB-338-UC33-MIDI-Windows-x64** artifact.
 - **Sounds exactly like the original.** The audio engine was rebuilt from ReBirth 2.01 to the
   bit. A song's exported loop equals the original's "Export Loop as Audio File" byte for byte. This
   is tested on 1,268 songs of the song collection, 531 of them on 43 third-party mods, and on a
@@ -47,7 +67,8 @@ and Windows.
 
 ## Not implemented
 
-- MIDI, VST and ReWire. OpenRB-338 is a standalone application only, with no MIDI input or sync.
+- MIDI clock/sync, direct MIDI instrument notes, macOS/Linux MIDI input, VST and ReWire.
+  OpenRB-338 is a standalone application; this fork currently adds Windows MIDI CC input only.
 - Mod themes: a mod changes the drum sounds, not the look of the panel.
 - The original's Edit menu functions on patterns (copy, paste, clear, shift, randomize and the
   like), and undo.

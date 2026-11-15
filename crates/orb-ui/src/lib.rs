@@ -7,12 +7,14 @@
 
 pub mod about;
 pub mod app;
+pub mod arpeggiator;
 pub mod art;
 pub mod behavior;
 pub mod browser;
 pub mod crash;
 pub mod document;
 pub mod error_box;
+pub mod generator;
 pub mod info;
 pub mod key_help;
 pub mod keys;
@@ -20,10 +22,12 @@ pub mod layout;
 pub mod link;
 pub mod logo_anim;
 pub mod menu;
+pub mod midi;
 pub mod mod_info;
 pub mod model;
 pub mod palette;
 pub mod session;
 pub mod settings;
 pub mod shortcuts;
+pub mod sidechain;
 pub mod version;

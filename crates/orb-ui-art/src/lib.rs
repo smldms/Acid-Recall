@@ -3,6 +3,7 @@
 //! what the check shows is what the app will show.
 
 pub mod font;
+pub mod graphite;
 pub mod layout;
 pub mod parts;
 pub mod svg;

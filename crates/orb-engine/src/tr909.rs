@@ -170,6 +170,9 @@ fn st(x: f64) -> f32 {
 /// A TR-909.
 #[derive(Debug, Clone)]
 pub struct Tr909 {
+    closed_hat_level: Option<u8>,
+    /// Optional sidechain event bookkeeping; independent of the original DSP state.
+    kicks: u64,
     /// `+4` (CDevice): the tick of the bar the pattern started at (song mode).
     pub pat_start: i32,
     /// `+0x30`: the pattern-mode parameter copy (the DLL's order).
@@ -231,6 +234,8 @@ impl Tr909 {
             p[1] = 16;
         }
         Tr909 {
+            closed_hat_level: None,
+            kicks: 0,
             pat_start: 0,
             params: DEFAULT_PARAMS,
             patterns,
@@ -278,6 +283,9 @@ impl Tr909 {
     /// the gain in [`Tr909::gain`].
     fn trigger(&mut self, i: usize) {
         let lv = self.live;
+        if i == BD && lv[BD_LEVEL] != 0 {
+            self.kicks = self.kicks.wrapping_add(1);
+        }
         match i {
             BD => self.bass(lv[BD_LEVEL], lv[BD_DECAY], lv[BD_TUNE], lv[BD_ATTACK]),
             SD => self.snare(lv[SD_LEVEL], lv[SD_TONE], lv[SD_TUNE], lv[SD_SNAPPY]),
@@ -306,7 +314,12 @@ impl Tr909 {
             RC => self.pitched(i, slot::RC, lv[RC_LEVEL], lv[RC_TUNE], FIXED_DECAY),
             RS => self.simple(i, slot::RS, lv[RS_LEVEL], FIXED_DECAY),
             CP => self.simple(i, slot::CP, lv[CP_LEVEL], FIXED_DECAY),
-            CH => self.simple(i, slot::CH, lv[HH_LEVEL], lv[CH_DECAY]),
+            CH => self.simple(
+                i,
+                slot::CH,
+                self.closed_hat_level.unwrap_or(lv[HH_LEVEL]),
+                lv[CH_DECAY],
+            ),
             OH => self.simple(i, slot::OH, lv[HH_LEVEL], lv[OH_DECAY]),
             _ => {}
         }
@@ -600,6 +613,15 @@ impl SongDevice for Tr909 {
 }
 
 impl ChannelDevice for Tr909 {
+    fn set_closed_hat_level(&mut self, level: Option<u8>) {
+        self.closed_hat_level = level.map(|v| v.min(127));
+    }
+    fn closed_hat_level(&self) -> u8 {
+        self.closed_hat_level.unwrap_or(self.live[HH_LEVEL])
+    }
+    fn kick_count(&self) -> u64 {
+        self.kicks
+    }
     fn playing_pattern(&self) -> Option<u8> {
         Some(self.cur_pattern)
     }

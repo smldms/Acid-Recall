@@ -115,6 +115,11 @@ fn the_callback_does_not_allocate() {
     };
     let cmds = vec![
         Command::Tempo(150_000),
+        Command::ClosedHatLevel(Some(48)),
+        Command::Sidechain(orb_engine::sidechain::Config {
+            enabled: true,
+            ..orb_engine::sidechain::Config::default()
+        }),
         Command::Shuffle(100),
         Command::Vintage(true),
         Command::LoopOn(true),

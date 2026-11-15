@@ -37,7 +37,7 @@ impl Ctl {
 
 /// Parses `layout.tsv`.
 pub fn controls() -> Vec<Ctl> {
-    LAYOUT_TSV
+    let mut controls: Vec<Ctl> = LAYOUT_TSV
         .lines()
         .skip(1)
         .map(|line| {
@@ -54,7 +54,17 @@ pub fn controls() -> Vec<Ctl> {
                 h: n(7),
             }
         })
-        .collect()
+        .collect();
+    // The original 909 leaves the upper CH knob position free.
+    let mut ch = controls
+        .iter()
+        .find(|c| c.id == "tr909.hh_level")
+        .unwrap()
+        .clone();
+    ch.id = "tr909.ch_level".into();
+    ch.x -= 21.0;
+    controls.push(ch);
+    controls
 }
 
 /// The section backgrounds drawn first: (part, x, y). The row focus bars are not here.
@@ -118,7 +128,7 @@ mod tests {
     #[test]
     fn layout_has_every_control() {
         let c = controls();
-        assert_eq!(c.len(), 348);
+        assert_eq!(c.len(), 349);
         assert!(c.iter().all(|c| c.w > 0.0 && c.h > 0.0));
         let play = c.iter().find(|c| c.id == "transport.play").unwrap();
         assert_eq!((play.x, play.y, play.w, play.h), (112.0, 21.0, 32.0, 25.0));

@@ -126,6 +126,8 @@ fn st(x: f64) -> f32 {
 /// A TR-808.
 #[derive(Debug, Clone)]
 pub struct Tr808 {
+    /// Optional sidechain event bookkeeping; independent of the original DSP state.
+    kicks: u64,
     /// `+4` (CDevice): the tick of the bar the pattern started at (song mode).
     pub pat_start: i32,
     /// `+0x30`: the pattern-mode parameter copy.
@@ -180,6 +182,7 @@ impl Tr808 {
             p[1] = 16;
         }
         Tr808 {
+            kicks: 0,
             pat_start: 0,
             params: DEFAULT_PARAMS,
             patterns,
@@ -223,6 +226,9 @@ impl Tr808 {
     /// Instrument `i` (`sub_10027894`, cases 1..11).
     fn trigger(&mut self, i: usize) {
         let lv = self.live;
+        if i == BD && lv[BD_LEVEL] != 0 {
+            self.kicks = self.kicks.wrapping_add(1);
+        }
         match i {
             BD => self.bass_or_cymbal(true),
             CY => self.bass_or_cymbal(false),
@@ -503,6 +509,9 @@ impl SongDevice for Tr808 {
 }
 
 impl ChannelDevice for Tr808 {
+    fn kick_count(&self) -> u64 {
+        self.kicks
+    }
     fn playing_pattern(&self) -> Option<u8> {
         Some(self.cur_pattern)
     }

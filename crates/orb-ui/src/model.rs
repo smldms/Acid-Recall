@@ -136,7 +136,7 @@ impl Transport {
     }
 
     pub fn tempo_display(&self) -> i32 {
-        self.tempo / 1000
+        (self.tempo + 500) / 1000
     }
 
     pub fn bar_display(&self) -> i32 {
@@ -264,6 +264,9 @@ impl Synth303 {
 /// The whole panel's state.
 #[derive(Clone, Debug)]
 pub struct Panel {
+    pub restart_on_stop: bool,
+    pub studio_meters: [orb_engine::studio::meter::Reading; 8],
+    pub sampler_playheads: [Option<orb_engine::studio::sampler::Playhead>; 8],
     pub transport: Transport,
     pub rows: [Row; 4],
     /// The row with the focus 0..=3.
@@ -320,6 +323,9 @@ fn index_of(section: &str, prefix: &str) -> Option<usize> {
 impl Panel {
     pub fn new() -> Self {
         let mut p = Self {
+            restart_on_stop: false,
+            studio_meters: Default::default(),
+            sampler_playheads: [None; 8],
             transport: Transport::default(),
             rows: Default::default(),
             focus: 0,
@@ -379,6 +385,10 @@ impl Panel {
         }
         p.numbers.insert("delay.steps".into(), 3);
         p.numbers.insert("pcf.pattern".into(), 0);
+        for (id, value) in crate::studio::midi::defaults() {
+            p.knobs
+                .insert(id, behavior::knob_from_engine(i32::from(value)));
+        }
         p
     }
 
@@ -632,6 +642,13 @@ impl Panel {
         behavior::switch_position(id, self.switch(id))
     }
 
+    pub fn set_delay_steps(&mut self, value: i32) {
+        let value = value.clamp(1, 32);
+        if self.numbers.insert("delay.steps".into(), value) != Some(value) {
+            self.set_event("delay.steps", value);
+        }
+    }
+
     pub fn set_switch(&mut self, id: &str, v: u8) {
         if id == "transport.mode" {
             self.transport.song_mode = v != 0;
@@ -735,6 +752,10 @@ impl Panel {
     /// The mouse-down action of a toggle, trigger, grid, radio or mode control.
     /// `now` is the time in seconds (for the 303 note flash).
     pub fn press(&mut self, id: &str, now: f64) {
+        if crate::studio::midi::is_action(id) {
+            self.emit(Event::Press { id: id.to_string() });
+            return;
+        }
         let Some((sec, name)) = id.split_once('.') else {
             return;
         };
@@ -801,6 +822,19 @@ impl Panel {
                 });
             }
             "stop" => {
+                if self.restart_on_stop {
+                    let recording = t.recording;
+                    t.recording = false;
+                    t.playing = false;
+                    t.position = 0;
+                    if recording {
+                        self.set_event("transport.record", 0);
+                    }
+                    self.emit(Event::Press {
+                        id: "transport.stop".into(),
+                    });
+                    return;
+                }
                 // Playing: stop `{1, 0}`; stopped: locate `{8, t}` (`sub_429FE6`).
                 let was_playing = t.playing;
                 let was_recording = t.recording;
@@ -1018,7 +1052,7 @@ impl Panel {
         }
     }
 
-    /// Sets a TR-909 step of the selected instrument; a hi-hat step clears the other hi-hat.
+    /// Sets a TR-909 step of the selected instrument. CH and OH are independent lanes.
     pub fn set_step909(&mut self, step: usize, value: u8) {
         self.put_step909(self.inst909, step, value);
     }
@@ -1033,17 +1067,6 @@ impl Panel {
             step,
             value,
         });
-        if value != 0 && (i == 8 || i == 9) {
-            let other = 17 - i;
-            if self.steps909[other][step] != 0 {
-                self.steps909[other][step] = 0;
-                self.emit(Event::Step909 {
-                    instrument: other,
-                    step,
-                    value: 0,
-                });
-            }
-        }
     }
 
     /// The new value a mouse down on a 909 step gives, from the current step and modifiers.
@@ -1247,6 +1270,30 @@ impl Panel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn studio_stop_always_rewinds_and_fractional_tempo_rounds_to_nearest_bpm() {
+        let mut panel = Panel::new();
+        panel.restart_on_stop = true;
+        for playing in [true, false] {
+            panel.transport.playing = playing;
+            panel.transport.position = 5000;
+            panel.transport.recording = true;
+            panel.press("transport.stop", 0.0);
+            assert_eq!(panel.transport.position, 0);
+            assert!(!panel.transport.playing && !panel.transport.recording);
+            assert!(
+                panel
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, Event::Press { id } if id == "transport.stop"))
+            );
+        }
+        for tempo in [139_999, 140_000, 140_180] {
+            panel.transport.tempo = tempo;
+            assert_eq!(panel.transport.tempo_display(), 140);
+        }
+    }
     use crate::behavior::Mods;
 
     #[test]
@@ -1445,14 +1492,21 @@ mod tests {
     }
 
     #[test]
-    fn tr909_hihats_exclude_each_other() {
+    fn tr909_hihats_are_independent() {
         let mut p = Panel::new();
         p.inst909 = 8;
         p.set_step909(3, 1);
         p.inst909 = 9;
         p.set_step909(3, 2);
-        assert_eq!(p.steps909[8][3], 0);
+        assert_eq!(p.steps909[8][3], 1);
         assert_eq!(p.steps909[9][3], 2);
+        p.set_step909(3, 0);
+        assert_eq!((p.steps909[8][3], p.steps909[9][3]), (1, 0));
+        for instrument in [10, 11] {
+            p.inst808 = instrument;
+            p.set_step808(3, true);
+        }
+        assert!(p.steps808[10][3] && p.steps808[11][3]);
         p.inst909 = 1;
         assert_eq!(p.step909_new_value(3, Mods::default()), 1);
     }

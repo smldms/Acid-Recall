@@ -9,8 +9,8 @@
 # jobs). The AppDir is laid out on any host; the AppImage is then packed by appimagetool
 # (pinned below: version and sha256), natively on a Linux host of the target's architecture, and
 # in the Ubuntu 22.04 build image (Docker) anywhere else. appimagetool runs with
-# --appimage-extract-and-run, so no FUSE is needed. The icons come from `ui-art iconset`, which
-# needs cargo on the host. docs/building.md ("The AppImage") describes the result.
+# --appimage-extract-and-run, so no FUSE is needed. The icon is the committed ACID RECALL PNG.
+# docs/building.md ("The AppImage") describes the result.
 # Environment as scripts/build.sh; APPIMAGETOOL names an appimagetool to use instead of the
 # download.
 set -euo pipefail
@@ -94,9 +94,9 @@ chmod 755 "$appdir/AppRun"
 cat > "$appdir/usr/share/applications/OpenRB-338.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=OpenRB-338
+Name=ACID RECALL
 GenericName=Bass line and drum machine
-Comment=A reimplementation of the audio engine of Propellerhead ReBirth RB-338
+Comment=Acid techno studio
 Exec=OpenRB-338 %f
 Icon=OpenRB-338
 Terminal=false
@@ -106,21 +106,13 @@ X-AppImage-Version=$version
 EOF
 cp "$appdir/usr/share/applications/OpenRB-338.desktop" "$appdir/OpenRB-338.desktop"
 
-# The icon: the committed app_icon part (assets/ui/app_icon.svg) rendered with resvg by ui-art,
-# at 16 to 512 px (the 64 px one is the 32 px size at 2x).
-icons=$(mktemp -d)
-trap 'rm -rf "$icons"' EXIT
-cargo run --manifest-path "$root/Cargo.toml" --release --locked -q -p orb-ui-art --bin ui-art \
-    -- iconset "$icons" >/dev/null
-for pair in 16:icon_16x16 32:icon_32x32 64:icon_32x32@2x 128:icon_128x128 256:icon_256x256 \
-    512:icon_512x512; do
-    size=${pair%%:*}
-    dir=$appdir/usr/share/icons/hicolor/${size}x${size}/apps
-    mkdir -p "$dir"
-    cp "$icons/${pair#*:}.png" "$dir/OpenRB-338.png"
-done
-cp "$icons/icon_256x256.png" "$appdir/OpenRB-338.png"
-cp "$icons/icon_256x256.png" "$appdir/.DirIcon"
+# Match the icon used by the ACID RECALL window.
+icon=$root/assets/brand/acid-recall.png
+icon_dir=$appdir/usr/share/icons/hicolor/512x512/apps
+mkdir -p "$icon_dir"
+cp "$icon" "$icon_dir/OpenRB-338.png"
+cp "$icon" "$appdir/OpenRB-338.png"
+cp "$icon" "$appdir/.DirIcon"
 
 # the squashfs stores the file times: give every file the build time
 stamp=$(TZ=UTC date -r "$SOURCE_DATE_EPOCH" +%Y%m%d%H%M.%S 2>/dev/null \

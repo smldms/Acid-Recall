@@ -403,7 +403,7 @@ integrity, genre/harmony constraints and the real player's allocation/free guard
 ## MIDI controllers and Studio
 
 Options > MIDI Controller can listen to several input devices simultaneously (WinMM on
-Windows, CoreMIDI on macOS).
+Windows, CoreMIDI on macOS, the ALSA sequencer on Linux).
 Input 1 preserves the existing controller and assignments. Use **Add MIDI input** for
 Input 2 and further slots, choose a different device in each, then Learn as usual. The next
 CC identifies both its controller slot and channel, so two devices may use the same CC
@@ -427,7 +427,7 @@ CC button press (64-127 pressed, 0-63 released). Boolean controls use that same 
 threshold, while continuous controls retain pickup. Quantized pitch and mode selectors
 preserve the controller position until an external UI or project change requires pickup.
 
-## MIDI Clock IN / OUT (Windows and macOS)
+## MIDI Clock IN / OUT
 
 Open **MIDI > MIDI CLOCK / SYNC**. Choose **MASTER / OUT** to send tempo and
 Start/Continue/Stop to an external machine, or **SLAVE / IN** to follow its clock and

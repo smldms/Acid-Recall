@@ -1,12 +1,14 @@
-# ACID RECALL 1.0 — MIDI controller setup (Windows and macOS)
+# ACID RECALL 1.0 — MIDI controller setup
 
 [Official website](https://acidrecall.com) · [Studio guide](studio.md)
 
 Control ACID RECALL with a UC-33e or another controller sending absolute MIDI CC messages.
 Windows MIDI input uses the built-in WinMM API, macOS uses CoreMIDI: no extra driver is
 needed. On macOS the input list shows every CoreMIDI source, including IAC buses and network
-sessions set up in Audio MIDI Setup. Linux still builds, but its MIDI device backend is not
-implemented. MIDI Clock sync has its own [setup guide](midi-clock.md).
+sessions set up in Audio MIDI Setup. Linux uses the ALSA sequencer (through the `midir` crate):
+the input list shows what `aconnect -l` shows, including PipeWire's bridged ports. MIDI Clock
+sync has its own [setup guide](midi-clock.md); [midi-testing.md](midi-testing.md) describes how
+each platform is checked.
 
 ## Connect and learn
 

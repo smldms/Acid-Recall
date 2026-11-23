@@ -1,9 +1,10 @@
 //! MIDI controller input, mapping and pickup, outside the audio callback.
 //!
 //! The device backends are Windows WinMM and macOS CoreMIDI (no extra driver or Rust
-//! dependency); both deliver WinMM's packed short messages. Mapping is platform independent and
-//! uses the same Panel events as mouse edits. A dedicated worker handles MIDI Clock independently
-//! from GUI updates. Live instrument notes are not handled.
+//! dependency) and, on Linux, the ALSA sequencer through `midir`; all deliver WinMM's packed
+//! short messages. Mapping is platform independent and uses the same Panel events as mouse
+//! edits. A dedicated worker handles MIDI Clock independently from GUI updates. Live instrument
+//! notes are not handled.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -33,22 +34,30 @@ mod coremidi;
 #[cfg(target_os = "macos")]
 use coremidi as backend;
 
-/// Whether this platform has a MIDI device backend.
-pub const AVAILABLE: bool = cfg!(any(windows, target_os = "macos"));
+#[cfg(target_os = "linux")]
+mod alsa;
+#[cfg(target_os = "linux")]
+use alsa as backend;
 
-#[cfg(not(any(windows, target_os = "macos")))]
+/// Whether this platform has a MIDI device backend.
+pub const AVAILABLE: bool = cfg!(any(windows, target_os = "macos", target_os = "linux"));
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod backend {
     use super::Port;
 
     pub struct Input;
 
     pub fn ports() -> Result<Vec<Port>, String> {
-        Err("MIDI controller input is currently available on Windows and macOS only.".into())
+        Err("MIDI controller input is currently available on Windows, macOS and Linux only.".into())
     }
 
     impl Input {
         pub fn open(_id: u32, _clock: Option<super::sync::Sender>) -> Result<Self, String> {
-            Err("MIDI controller input is currently available on Windows and macOS only.".into())
+            Err(
+                "MIDI controller input is currently available on Windows, macOS and Linux only."
+                    .into(),
+            )
         }
 
         pub fn drain(&self) -> Vec<u32> {
@@ -66,10 +75,10 @@ mod backend {
     pub struct Output;
     impl Output {
         pub fn open(_id: u32) -> Result<Self, String> {
-            Err("MIDI requires Windows or macOS.".into())
+            Err("MIDI requires Windows, macOS or Linux.".into())
         }
         pub fn send(&mut self, _word: u32) -> Result<(), String> {
-            Err("MIDI requires Windows or macOS.".into())
+            Err("MIDI requires Windows, macOS or Linux.".into())
         }
     }
     pub struct Timer;
@@ -815,8 +824,7 @@ impl App {
                 self.midi.router.reset();
             }
         }
-        // WinMM and CoreMIDI callbacks only enqueue data; all GUI calls happen here on the UI
-        // thread.
+        // The backend callbacks only enqueue data; all GUI calls happen here on the UI thread.
         ctx.request_repaint_after(std::time::Duration::from_millis(8));
         let now = ctx.input(|i| i.time);
         let mut learned = false;
@@ -854,7 +862,7 @@ impl App {
             .default_width(620.0)
             .vscroll(true)
             .show(ctx, |ui| {
-                ui.label("UC-33e / MIDI CC control - Windows and macOS");
+                ui.label("UC-33e / MIDI CC control");
                 ui.horizontal(|ui| {
                     import = ui.button("Import routing...").clicked();
                     export = ui.button("Export routing...").clicked();

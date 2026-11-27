@@ -377,6 +377,11 @@ fn main() -> eframe::Result {
             if let Some(view) = studio_view {
                 if matches!(view.as_str(), "synth" | "chord") {
                     app.studio.settings.synth_slots[1].enabled = true;
+                    if demo && view == "synth" {
+                        app.studio.settings.synth_slots[1].select_factory_preset(
+                            orb_engine::studio::acid_presets::EXPERIMENTAL_START,
+                        );
+                    }
                     let editor = if view == "synth" { "graphite-edit" } else { "acid-chord-editor" };
                     cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::unique(editor), Some(1_usize)));
                 }

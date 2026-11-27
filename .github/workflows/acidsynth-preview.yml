@@ -21,6 +21,8 @@ jobs:
         shell: pwsh
         run: . ./scripts/setup-asio.ps1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          cache-on-failure: true
       - name: Build the desktop preview
         run: cargo build --locked --release -p orb-ui
       - name: Assemble portable preview
@@ -35,6 +37,8 @@ jobs:
           New-Item -ItemType Directory -Path "$out/sources"
           Copy-Item .build-tools/asio/ASIO-SDK_2.3.4_2025-10-15.zip "$out/sources/"
           "V2 AcidSynth preview - ${{ github.sha }}" | Set-Content "$out/VERSION"
+      - name: Render five factory patches with the native sound engine
+        run: cargo run --locked --release -p orb-engine --example soundcheck -- acidsynth-preview/AcidSynth-Soundcheck.wav
       - name: Capture the demo rack and the AcidSynth editors
         if: hashFiles('assets/demos/Low-Orbit.recall') != ''
         shell: pwsh

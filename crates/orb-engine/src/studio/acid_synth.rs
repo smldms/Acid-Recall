@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::frame::Block;
 use std::f32::consts::TAU;
+#[path = "acid_models.rs"]
+mod models;
 
 const RATE: f32 = 44100.0;
 const TABLE: usize = 512;
@@ -42,8 +44,16 @@ pub struct Patch {
     pub sub: f32,
     pub drive: f32,
     pub chorus: f32,
-    /// Blend, ring modulation or phase modulation by oscillator B.
+    /// Blend, ring modulation, two-oscillator phase modulation, FM4 or Sync Fold.
     pub osc_mode: u8,
+    /// Cascade, parallel pairs, fan-in or split stack.
+    pub fm_algorithm: u8,
+    /// Frequency ratios of the second, third and fourth operators.
+    pub fm_ratios: [f32; 3],
+    pub fm_index: f32,
+    pub fm_feedback: f32,
+    pub fold: f32,
+    pub sync: f32,
     /// Low-pass, band-pass, high-pass or notch.
     pub filter_mode: u8,
     /// Colour, cutoff, pitch or oscillator mix.
@@ -61,6 +71,8 @@ impl Patch {
         attack: 0.05, release: 0.25, cutoff: 0.75, resonance: 0.0,
         lfo_rate: 0.25, lfo_depth: 0.0, decay: 0.0, sustain: 1.0,
         filter_env: 0.0, sub: 0.0, drive: 0.0, chorus: 0.0,
+        fm_algorithm: 0, fm_ratios: [2.0, 3.0, 4.0],
+        fm_index: 0.45, fm_feedback: 0.1, fold: 0.42, sync: 0.45,
         osc_mode: 0, filter_mode: 0, lfo_target: 0, lfo_shape: 0, transpose_b: 0, routes: [ModRoute::OFF; 4],
     };
 }
@@ -194,7 +206,15 @@ impl Slot {
             }
         }
         p.transpose_b = p.transpose_b.clamp(-24, 24);
-        p.osc_mode = p.osc_mode.min(2);
+        p.osc_mode = p.osc_mode.min(4);
+        p.fm_algorithm = p.fm_algorithm.min(3);
+        for ratio in &mut p.fm_ratios {
+            *ratio = if ratio.is_finite() { ratio.clamp(0.25, 12.0) } else { 1.0 };
+        }
+        p.fm_index = unit(p.fm_index);
+        p.fm_feedback = unit(p.fm_feedback);
+        p.fold = unit(p.fold);
+        p.sync = unit(p.sync);
         p.filter_mode = p.filter_mode.min(3);
         p.lfo_target = p.lfo_target.min(3);
         p.lfo_shape = p.lfo_shape.min(3);
@@ -229,6 +249,14 @@ impl Bank {
         Self(levels)
     }
 
+    fn sine(&self, phase: f32) -> f32 {
+        // rem_euclid can round a tiny negative input to exactly 1.0.
+        let x = phase * TABLE as f32;
+        let i = x as usize & (TABLE - 1);
+        let sine = &self.0[0][0];
+        sine[i] + (sine[i + 1] - sine[i]) * x.fract()
+    }
+
     fn read(&self, level: usize, phase: f32, shape: f32) -> f32 {
         let x = phase * TABLE as f32;
         let i = x as usize;
@@ -252,6 +280,7 @@ struct Voice {
     phase_a: f32,
     phase_b: f32,
     phase_sub: f32,
+    model: models::State,
     decaying: bool,
     increment: f32,
     level: usize,
@@ -420,6 +449,7 @@ impl Instrument {
         let semitones = 12.0 * pitch_offset + if p.lfo_target == 2 { lfo } else { 0.0 };
         let pitch = if semitones == 0.0 { 1.0 } else { 2.0_f32.powf(semitones / 12.0) };
         let mix = (p.mix + mix_offset + if p.lfo_target == 3 { 0.5 * lfo } else { 0.0 }).clamp(0.0, 1.0);
+        let model = models::Controls::new(&p, color, [wave_a_offset, wave_b_offset], mix);
         let wave_a = p.wave_a + color + wave_a_offset;
         let wave_b = p.wave_b - 0.6 * color + wave_b_offset;
         let drive = (p.drive + drive_offset).clamp(0.0, 1.0);
@@ -479,16 +509,20 @@ impl Instrument {
                 }
                 let inc_a = v.increment * pitch;
                 let inc_b = inc_a * detune * transpose;
-                let level_b = v.level.saturating_sub(shift_b);
-                let b = if inc_b < 0.49 { bank.read(level_b, v.phase_b, wave_b) } else { 0.0 };
-                let phase = if p.osc_mode == 2 {
-                    (v.phase_a + b * mix * 0.22 + 1.0).fract()
-                } else { v.phase_a };
-                let a = if inc_a < 0.49 { bank.read(v.level.saturating_sub(shift_a), phase, wave_a) } else { 0.0 };
-                let osc = match p.osc_mode {
-                    1 => a + (1.6 * a * b - a) * mix,
-                    2 => a,
-                    _ => a + (b-a) * mix,
+                let osc = if p.osc_mode >= 3 {
+                    v.model.sample(bank, &model, inc_a)
+                } else {
+                    let level_b = v.level.saturating_sub(shift_b);
+                    let b = if inc_b < 0.49 { bank.read(level_b, v.phase_b, wave_b) } else { 0.0 };
+                    let phase = if p.osc_mode == 2 {
+                        (v.phase_a + b * mix * 0.22 + 1.0).fract()
+                    } else { v.phase_a };
+                    let a = if inc_a < 0.49 { bank.read(v.level.saturating_sub(shift_a), phase, wave_a) } else { 0.0 };
+                    match p.osc_mode {
+                        1 => a + (1.6 * a * b - a) * mix,
+                        2 => a,
+                        _ => a + (b-a) * mix,
+                    }
                 };
                 let sub = if p.sub > 0.0 { bank.read(0, v.phase_sub, 0.0) * p.sub * 0.7 } else { 0.0 };
                 sum += (osc + sub) * v.gain * v.velocity * 0.14;
@@ -678,6 +712,41 @@ mod tests {
     }
 }
 
+/// Draw two periods of the selected alternative oscillator at A3, before filter/envelope/FX.
+pub fn model_preview(patch: &Patch, macros: [f32; 4], samples: &mut [f32]) {
+    if samples.is_empty() { return; }
+    if patch.osc_mode < 3 {
+        samples.fill(0.0);
+        return;
+    }
+    thread_local! { static PREVIEW_BANK: Bank = Bank::new(); }
+    PREVIEW_BANK.with(|bank| draw_preview(bank, patch, macros, samples));
+}
+
+fn draw_preview(bank: &Bank, patch: &Patch, macros: [f32; 4], samples: &mut [f32]) {
+    let mut state = models::State::default();
+    let mut offsets = [0.0_f32; 2];
+    let mut mix_offset = 0.0;
+    let sources = [0.0, 0.0, patch.sustain, macros[0], macros[1], macros[2], macros[3]];
+    for route in patch.routes {
+        let amount = sources.get(usize::from(route.source)).copied().unwrap_or(0.0) * route.amount;
+        if route.dest < 2 { offsets[usize::from(route.dest)] += amount; }
+        if route.dest == 3 { mix_offset += amount; }
+    }
+    let mix = (patch.mix + mix_offset).clamp(0.0, 1.0);
+    let controls = models::Controls::new(patch, (macros[0] - 0.5) * 0.5, offsets, mix);
+    const FRAMES: usize = 401;
+    let mut cycle = [0.0; FRAMES];
+    for _ in 0..201 { state.sample(bank, &controls, 220.0 / RATE); }
+    for value in &mut cycle { *value = state.sample(bank, &controls, 220.0 / RATE); }
+    let stride = (FRAMES - 1) as f32 / samples.len().saturating_sub(1).max(1) as f32;
+    for (i, value) in samples.iter_mut().enumerate() {
+        let x = (i as f32 * stride).min((FRAMES - 1) as f32);
+        let a = x as usize;
+        *value = cycle[a] + (cycle[(a + 1).min(FRAMES - 1)] - cycle[a]) * x.fract();
+    }
+}
+
 #[cfg(test)]
 mod patch_tests {
     use super::*;
@@ -694,6 +763,46 @@ mod patch_tests {
             result.extend_from_slice(&output);
         }
         result
+    }
+
+    fn rms_difference(a: &[f32], b: &[f32]) -> f32 {
+        (a.iter().zip(b).map(|(x,y)| (x-y).powi(2)).sum::<f32>() / a.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn four_operator_algorithms_and_sync_fold_render_distinct_audible_chords() {
+        let bank = Bank::new();
+        let base = Patch { attack: 0.0, cutoff: 0.86, fm_index: 0.67, fm_feedback: 0.42,
+            fm_ratios: [1.5, 2.73, 4.1], mix: 0.71, ..Patch::INIT };
+        let legacy = audio(&bank, base);
+        let mut sounds = vec![legacy.clone()];
+        for (mode, algorithm) in [(3,0), (3,1), (3,2), (3,3), (4,0)] {
+            let patch = Patch { osc_mode: mode, fm_algorithm: algorithm, ..base };
+            let out = audio(&bank, patch);
+            assert!(out.iter().all(|s| s.is_finite() && s.abs() < 2.0));
+            assert!(out.iter().any(|s| s.abs() > 0.02));
+            for previous in &sounds { assert!(rms_difference(&out, previous) > 0.003); }
+            sounds.push(out);
+        }
+        // The extra oscillator controls are strictly bypassed by the original engines.
+        for mode in 0..=2 {
+            let old = Patch { osc_mode: mode, ..base };
+            let changed = Patch { fm_ratios: [12.0; 3], fm_feedback: 1.0, fm_index: 1.0,
+                fm_algorithm: 3, fold: 1.0, sync: 1.0, ..old };
+            assert_eq!(audio(&bank, old), audio(&bank, changed));
+        }
+        for (mode, changes) in [
+            (3, vec![Patch { fm_feedback: 0.93, ..base }, Patch { fm_index: 0.1, ..base },
+                Patch { fm_ratios: [2.0, 2.73, 4.1], ..base },
+                Patch { fm_ratios: [1.5, 3.5, 4.1], ..base },
+                Patch { fm_ratios: [1.5, 2.73, 2.0], ..base }]),
+            (4, vec![Patch { sync: 0.87, ..base }, Patch { fold: 0.87, ..base }]),
+        ] {
+            let original = audio(&bank, Patch { osc_mode: mode, ..base });
+            for edit in changes {
+                assert!(rms_difference(&original, &audio(&bank, Patch { osc_mode: mode, ..edit })) > 0.001);
+            }
+        }
     }
 
     #[test]

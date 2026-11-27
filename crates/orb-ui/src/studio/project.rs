@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8; 8] = b"ORB338S2";
 const SYNTH_MAGIC: &[u8; 8] = b"ORB338S3";
 const EXTENDED_SYNTH_MAGIC: &[u8; 8] = b"ORB338S4";
+const HYBRID_SYNTH_MAGIC: &[u8; 8] = b"ORB338S5";
 const MAX_BYTES: usize = 256 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
 
@@ -92,7 +93,16 @@ impl Project {
             .synth_slots
             .iter()
             .any(|slot| *slot != Default::default());
-        let mut out = if has_synth_data { EXTENDED_SYNTH_MAGIC } else { MAGIC }.to_vec();
+        let needs_hybrid = self.metadata.settings.synth_slots.iter().any(|slot| {
+            use orb_engine::studio::{acid_presets::EXPERIMENTAL_START, acid_synth::Patch};
+            let patch = &slot.patch;
+            usize::from(slot.preset) >= EXPERIMENTAL_START || patch.osc_mode > 2
+                || patch.fm_algorithm != Patch::INIT.fm_algorithm || patch.fm_ratios != Patch::INIT.fm_ratios
+                || patch.fm_index != Patch::INIT.fm_index || patch.fm_feedback != Patch::INIT.fm_feedback
+                || patch.fold != Patch::INIT.fold || patch.sync != Patch::INIT.sync
+        });
+        let version = if needs_hybrid { HYBRID_SYNTH_MAGIC } else if has_synth_data { EXTENDED_SYNTH_MAGIC } else { MAGIC };
+        let mut out = version.to_vec();
         let metadata = toml::to_string(&self.metadata).map_err(|e| e.to_string())?;
         if metadata.len() > MAX_METADATA_BYTES {
             return Err("Studio project metadata exceeds its size limit".into());
@@ -118,10 +128,10 @@ impl Project {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() > MAX_BYTES || ![MAGIC, SYNTH_MAGIC, EXTENDED_SYNTH_MAGIC]
+        if bytes.len() > MAX_BYTES || ![MAGIC, SYNTH_MAGIC, EXTENDED_SYNTH_MAGIC, HYBRID_SYNTH_MAGIC]
             .iter().any(|magic| bytes.starts_with(&magic[..]))
         {
-            return Err("Not a supported Studio project (ORB338S2, ORB338S3 or ORB338S4)".into());
+            return Err("Not a supported Studio project (expected ORB338S2 through ORB338S5)".into());
         }
         let mut bytes = &bytes[8..];
         let mut metadata: Metadata = toml::from_str(
@@ -222,6 +232,17 @@ mod tests {
         assert_eq!(pad.steps[0].notes, [50, 57, 65, 76]);
         assert_eq!(pad.steps[0].gate_steps * pad.step_ticks, 4 * 768);
         assert_eq!(pad.step_count(), 16);
+    }
+
+    #[test]
+    fn experimental_patch_survives_a_project_round_trip_while_its_slot_is_dormant() {
+        use orb_engine::studio::acid_presets::EXPERIMENTAL_START;
+        let mut project = Project::decode(include_bytes!("../../../../assets/demos/Low-Orbit.recall")).unwrap();
+        project.metadata.settings.synth_slots[0].select_factory_preset(EXPERIMENTAL_START);
+        let encoded = project.encode().unwrap();
+        assert!(encoded.starts_with(HYBRID_SYNTH_MAGIC));
+        let decoded = Project::decode(&encoded).unwrap();
+        assert_eq!(decoded.metadata.settings.synth_slots, project.metadata.settings.synth_slots);
     }
 
     #[test]

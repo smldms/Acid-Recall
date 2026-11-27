@@ -11,7 +11,6 @@ use super::{Binding, Config, Kind, ValueRange, kind};
 const FORMAT: &str = "openrb-midi-routing";
 const VERSION: u32 = 1;
 const MAX_BYTES: usize = 1024 * 1024;
-const MAX_BINDINGS: usize = 512;
 
 /// Read the old application's settings once, only when the musician requests recovery.
 pub(super) fn recover_v1(path: &Path, current: &mut Config) -> Result<usize, String> {
@@ -122,7 +121,7 @@ impl RoutingPreset {
         if self.format != FORMAT || self.version != VERSION {
             return Err("Not a supported OpenRB MIDI routing file (expected version 1).".into());
         }
-        if self.bindings.len() > MAX_BINDINGS {
+        if self.bindings.len() > super::targets().len() {
             return Err("Too many assignments in the routing file.".into());
         }
         let mut sources = HashSet::new();

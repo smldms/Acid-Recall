@@ -6,25 +6,20 @@ use orb_engine::studio::{
 };
 use orb_player::Command;
 
-const SYNTH_MACROS: [&str; 4] = ["timbre", "movement", "width", "space"];
+mod acid;
 
-fn synth_macro(id: &str) -> Option<(usize, usize)> {
-    let (slot, name) = id.split_once('.')?;
-    let row = match slot {
-        "acidsynth1" => 0,
-        "acidsynth2" => 1,
-        _ => return None,
-    };
-    Some((row, SYNTH_MACROS.iter().position(|&field| field == name)?))
+pub(crate) fn registered_controls() -> &'static [(String, String)] {
+    static CONTROLS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    CONTROLS.get_or_init(controls)
 }
 
 pub fn controls() -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (row, slot) in ["A", "B"].iter().enumerate() {
-        for name in SYNTH_MACROS {
+        for field in acid::FIELDS {
             out.push((
-                format!("acidsynth{}.{name}", row + 1),
-                format!("AcidSynth {slot} / {name}"),
+                format!("acidsynth{}.{}", row + 1, field.id),
+                format!("AcidSynth {slot} / {}", field.label),
             ));
         }
     }
@@ -111,11 +106,12 @@ pub fn controls() -> Vec<(String, String)> {
 }
 
 pub fn is_action(id: &str) -> bool {
-    id.starts_with("sampler") && (id.ends_with(".audition") || id.ends_with(".warp_fit"))
+    matches!(id, "acidsynth1.audition" | "acidsynth2.audition")
+        || id.starts_with("sampler") && (id.ends_with(".audition") || id.ends_with(".warp_fit"))
 }
 
 pub fn is_boolean(id: &str) -> bool {
-    id == "studio.enabled"
+    matches!(id, "acidsynth1.sequence_enabled" | "acidsynth2.sequence_enabled" | "studio.enabled")
         || matches!(id, "duck1.on" | "duck2.on" | "sampler.dist" | "sampler.on")
         || id.starts_with("sampler")
             && [".reverse", ".mute", ".solo", ".sidechain", ".warp"]
@@ -204,8 +200,8 @@ fn lane_value(lane: &Lane, name: &str) -> f64 {
 }
 
 fn value(settings: &Settings, id: &str) -> f64 {
-    if let Some((row, index)) = synth_macro(id) {
-        return f64::from(settings.synth_slots[row].macros[index]);
+    if let Some((row, field)) = acid::target(id) {
+        return f64::from(field.cc(&settings.synth_slots[row])) / 127.0;
     }
     match id {
         "studio.enabled" => f64::from(u8::from(settings.enabled)),
@@ -252,6 +248,22 @@ pub fn defaults() -> Vec<(String, u8)> {
 }
 
 impl App {
+    pub(crate) fn audition_acid_patch(&mut self, row: usize) {
+        let slot = &self.studio.settings.synth_slots[row];
+        if !slot.enabled {
+            return;
+        }
+        let selected = self.studio.context.data(|data| {
+            data.get_temp::<usize>(eframe::egui::Id::unique(("acid-selected-step", row)))
+        }).unwrap_or(0);
+        let chord = slot.step(selected.min(slot.step_count() - 1)).notes;
+        let notes = if chord.iter().any(|&note| note != 0) { chord } else { [48, 55, 60, 0] };
+        self.studio_command(Command::AcidLive {
+            slot: row,
+            event: orb_engine::studio::acid_live::Event::Audition { notes, frames: 3 * 44_100 },
+        });
+    }
+
     pub(crate) fn studio_midi(&mut self) {
         if self.studio.history_restoring {
             return;
@@ -259,8 +271,13 @@ impl App {
         let before = self.studio.settings.clone();
         let duck_before = self.settings.sidechain.clone();
         let mut auditions = Vec::new();
+        let mut acid_auditions = Vec::new();
         for event in &self.panel.events {
             if let Event::Press { id } = event {
+                if let Some((row, field)) = acid::target(id)
+                    && matches!(field.domain, acid::Domain::Action) {
+                    acid_auditions.push(row);
+                }
                 if let Some((i, "audition")) = lane_field(id) {
                     auditions.push(i);
                 }
@@ -292,8 +309,8 @@ impl App {
                 continue;
             }
             let s = &mut self.studio.settings;
-            if let Some((row, index)) = synth_macro(id) {
-                s.synth_slots[row].macros[index] = v as f32;
+            if let Some((row, field)) = acid::target(id) {
+                field.apply(&mut s.synth_slots[row], raw as u8);
                 continue;
             }
             match id.as_str() {
@@ -382,10 +399,13 @@ impl App {
         if self.settings.sidechain != duck_before {
             self.sidechain_changed(&self.studio.context.clone());
         }
-        if !auditions.is_empty() {
+        if !auditions.is_empty() || !acid_auditions.is_empty() {
             self.studio_poll(&self.studio.context.clone());
             for lane in auditions {
                 self.studio_command(Command::StudioAudition(lane));
+            }
+            for row in acid_auditions {
+                self.audition_acid_patch(row);
             }
         }
         self.studio_mirror();
@@ -393,13 +413,21 @@ impl App {
 
     pub(crate) fn studio_mirror(&mut self) {
         let s = &self.studio.settings;
-        for (id, _) in controls() {
-            if is_action(&id) {
+        for (id, _) in registered_controls() {
+            if is_action(id) {
                 continue;
             }
-            if let Some(v) = duck_value(&self.settings.sidechain, &id) {
+            if let Some((row, field)) = acid::target(id) {
+                let slot = &s.synth_slots[row];
+                let canonical = field.cc(slot);
+                if !self.panel.value(id).is_some_and(|raw| raw == canonical || field.represents(slot, raw)) {
+                    self.panel.adopt(id, i32::from(canonical));
+                }
+                continue;
+            }
+            if let Some(v) = duck_value(&self.settings.sidechain, id) {
                 let duck = &self.settings.sidechain;
-                if let Some(raw) = self.panel.value(&id) {
+                if let Some(raw) = self.panel.value(id) {
                     let normalized = f64::from(raw) / 127.0;
                     let same = match id.as_str() {
                         "duck1.depth" => (normalized * 100.0).round() as u8 == duck.depth[0],
@@ -416,11 +444,11 @@ impl App {
                     }
                 }
                 self.panel
-                    .adopt(&id, (v.clamp(0.0, 1.0) * 127.0).round() as i32);
+                    .adopt(id, (v.clamp(0.0, 1.0) * 127.0).round() as i32);
                 continue;
             }
-            if let Some((i, name)) = lane_field(&id)
-                && let Some(raw) = self.panel.value(&id)
+            if let Some((i, name)) = lane_field(id)
+                && let Some(raw) = self.panel.value(id)
             {
                 let v = f64::from(raw) / 127.0;
                 let lane = &s.lanes[i];
@@ -444,7 +472,7 @@ impl App {
                 }
             }
             self.panel
-                .adopt(&id, (value(s, &id).clamp(0.0, 1.0) * 127.0).round() as i32);
+                .adopt(id, (value(s, id).clamp(0.0, 1.0) * 127.0).round() as i32);
         }
     }
 }
@@ -614,10 +642,11 @@ mod tests {
 
     #[test]
     fn all_studio_controls_are_registered_with_correct_midi_behavior() {
-        assert_eq!(controls().len(), 249 + 2 * SYNTH_MACROS.len());
+        assert_eq!(controls().len(), 249 + 2 * acid::FIELDS.len());
+        let panel = Panel::new();
         for (id, _) in controls() {
             assert!(kind(&id).is_some(), "{id}");
-            assert!(Panel::new().value(&id).is_some(), "{id}");
+            assert!(panel.value(&id).is_some(), "{id}");
         }
         assert_eq!(kind("sampler8.audition"), Some(Kind::Button));
         assert_eq!(kind("sampler1.mute"), Some(Kind::Switch));
@@ -803,11 +832,79 @@ mod tests {
     }
 
     #[test]
+    fn acidsynth_cc_routes_every_editor_field_independently_with_soft_takeover() {
+        let mut app = App::new(Panel::new(), None);
+        for row in 0..2 {
+            let other = app.studio.settings.synth_slots[1 - row].clone();
+            for field in acid::FIELDS {
+                let id = format!("acidsynth{}.{}", row + 1, field.id);
+                let mut router = Router::default();
+                match field.domain {
+                    acid::Domain::Action => {
+                        assert_eq!(kind(&id), Some(Kind::Button));
+                    }
+                    acid::Domain::Switch => {
+                        assert_eq!(kind(&id), Some(Kind::Switch));
+                        for raw in [0, 127, 0] {
+                            move_cc(&mut app, &mut router, &id, raw, true);
+                            assert_eq!(app.studio.settings.synth_slots[row].sequence_enabled, raw != 0);
+                        }
+                    }
+                    _ => {
+                        assert_eq!(kind(&id), Some(Kind::Knob), "{id}");
+                        move_cc(&mut app, &mut router, &id, 127, false);
+                        for raw in [0, 3, 11, 33, 42, 64, 96, 112, 127] {
+                            move_cc(&mut app, &mut router, &id, raw, true);
+                            assert_eq!(app.panel.value(&id), Some(raw), "{id} pickup {raw}");
+                            assert!(field.represents(&app.studio.settings.synth_slots[row], raw), "{id} {raw}");
+                        }
+                    }
+                }
+            }
+            assert_eq!(app.studio.settings.synth_slots[1 - row], other);
+        }
+    }
+
+    #[test]
+    fn acidsynth_midi_maximum_and_bipolar_neutral_are_exact() {
+        let mut app = App::new(Panel::new(), None);
+        let mut router = Router::default();
+        let id = "acidsynth1.route4.amount";
+        let mut config = Config { pickup: false, ..Default::default() };
+        config.bindings.push(Binding { input: 0, channel: 1, controller: 16, target: id.into() });
+        config.ranges.insert(id.into(), crate::midi::ValueRange { max: 64 });
+        for (cc, expected) in [(0, -1.0), (127, 0.0)] {
+            router.apply(Cc { channel: 1, controller: 16, value: cc }, &config, &mut app.panel, 0.0);
+            app.studio_midi();
+            app.panel.events.clear();
+            assert_eq!(app.studio.settings.synth_slots[0].patch.routes[3].amount, expected);
+        }
+    }
+
+    #[test]
+    fn acidsynth_audition_requires_a_new_press_and_selects_the_named_slot() {
+        let mut app = App::new(Panel::new(), None);
+        for row in 0..2 {
+            let id = format!("acidsynth{}.audition", row + 1);
+            let config = Config {
+                bindings: vec![Binding { input: 0, channel: 2, controller: 30, target: id.clone() }],
+                ..Default::default()
+            };
+            let mut router = Router::default();
+            for (raw, expected) in [(0, false), (127, true), (110, false), (0, false), (64, true)] {
+                router.apply(Cc { channel: 2, controller: 30, value: raw }, &config, &mut app.panel, 0.0);
+                assert_eq!(app.panel.events.iter().any(|event| matches!(event, Event::Press { id: target } if *target == id)), expected);
+                app.panel.events.clear();
+            }
+        }
+    }
+
+    #[test]
     fn acidsynth_macro_cc_preserves_the_other_slot_and_mirrors_pickup() {
         let mut app = App::new(Panel::new(), None);
         let mut router = Router::default();
         let original = app.studio.settings.synth_slots[0].macros;
-        for (index, name) in SYNTH_MACROS.iter().enumerate() {
+        for (index, name) in ["timbre", "movement", "width", "space"].iter().enumerate() {
             let id = format!("acidsynth2.{name}");
             move_cc(&mut app, &mut router, &id, 97, false);
             assert_eq!(app.panel.value(&id), Some(97));

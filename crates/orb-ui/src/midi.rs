@@ -363,11 +363,11 @@ fn effect_send(id: &str) -> bool {
 }
 
 pub fn label(id: &str) -> String {
-    if let Some((_, label)) = crate::studio::midi::controls()
-        .into_iter()
+    if let Some((_, label)) = crate::studio::midi::registered_controls()
+        .iter()
         .find(|(target, _)| target == id)
     {
-        return label;
+        return label.clone();
     }
     match id {
         "tr909.ch_level" => return "TR-909 / CH level (Closed Hat)".into(),

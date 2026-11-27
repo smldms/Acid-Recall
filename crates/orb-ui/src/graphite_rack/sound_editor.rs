@@ -3,7 +3,7 @@ use super::acid_synth::apply_preset;
 use super::{ACID, App, BORDER, DIM, INK, Ui, egui};
 use crate::midi::MidiMenu;
 use egui::{Color32, Frame, Margin, Pos2, RichText, Sense, Stroke, Vec2};
-use orb_engine::studio::acid_presets::PRESETS;
+use orb_engine::studio::acid_presets::{EXPERIMENTAL_START, PRESETS};
 use orb_engine::studio::acid_synth::{Patch, Slot};
 use std::f32::consts::{PI, TAU};
 
@@ -14,12 +14,12 @@ const OCHRE: Color32 = Color32::from_rgb(237, 178, 112);
 const LILAC: Color32 = Color32::from_rgb(183, 163, 226);
 
 /// Draw a control inside the currently scoped module, with its own accessible keyboard target.
-fn dial(ui: &mut Ui, label: &str, value: &mut f32, ink: Color32, midi: Option<&str>) -> bool {
+fn dial(ui: &mut Ui, label: &str, value: &mut f32, ink: Color32, midi: &str) -> bool {
     let initial = *value;
     ui.vertical_centered(|ui| {
         let size = ui.available_width().clamp(32.0, 46.0);
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click_and_drag());
-        let response = if let Some(id) = midi { response.midi_menu(ui, id) } else { response };
+        let response = response.midi_menu(ui, midi);
         if response.clicked() { response.request_focus(); }
         if response.dragged_by(egui::PointerButton::Primary) {
             let delta = ui.input(|i| {
@@ -50,19 +50,25 @@ fn dial(ui: &mut Ui, label: &str, value: &mut f32, ink: Color32, midi: Option<&s
             painter.circle_stroke(center, radius + 3.0, Stroke::new(1.0, ink));
         }
         response.on_hover_text(format!("{label} · {:.0}%\nDrag or use arrow keys. Hold Shift for fine adjustment.", *value * 100.0));
-        ui.label(RichText::new(label).size(11.0).color(INK));
+        midi_label(ui, RichText::new(label).size(11.0).color(INK), midi);
     });
     *value != initial
 }
 
-fn dials(ui: &mut Ui, params: &mut [(&str, &mut f32)], ink: Color32) -> bool {
-    let mut changed = false;
+fn target(row: usize, field: &str) -> String {
+    format!("acidsynth{}.{field}", row + 1)
+}
+
+fn midi_label(ui: &mut Ui, text: RichText, id: &str) {
+    ui.add(egui::Label::new(text).sense(Sense::click())).midi_menu(ui, id);
+}
+
+fn dials(ui: &mut Ui, row: usize, params: &mut [(&str, &str, &mut f32)], ink: Color32) {
     ui.columns(params.len(), |cols| {
-        for (col, (label, value)) in cols.iter_mut().zip(params) {
-            changed |= dial(col, label, value, ink, None);
+        for (col, (field, label, value)) in cols.iter_mut().zip(params) {
+            dial(col, label, value, ink, &target(row, field));
         }
     });
-    changed
 }
 
 fn module(ui: &mut Ui, title: &str, accent: Color32, draw: impl FnOnce(&mut Ui)) {
@@ -118,7 +124,22 @@ fn morph(t: f32, wave: f32) -> f32 {
     table[index] + (table[index+1] - table[index]) * (p - index as f32)
 }
 
-fn oscillator_graph(ui: &mut Ui, patch: &Patch) {
+fn oscillator_graph(ui: &mut Ui, patch: &Patch, macros: [f32; 4]) {
+    if patch.osc_mode >= 3 {
+        let key = ui.make_persistent_id("oscillator-preview");
+        let saved = ui.ctx().data(|d| d.get_temp::<(Patch, [f32; 4], [f32; 181])>(key));
+        let cycle = match saved {
+            Some((previous, knobs, trace)) if previous == *patch && knobs == macros => trace,
+            _ => {
+                let mut trace = [0.0; 181];
+                orb_engine::studio::acid_synth::model_preview(patch, macros, &mut trace);
+                ui.ctx().data_mut(|d| d.insert_temp(key, (*patch, macros, trace)));
+                trace
+            }
+        };
+        graph(ui, TEAL, |x| 0.5 + cycle[(x * 180.0).round() as usize] * 0.44);
+        return;
+    }
     graph(ui, TEAL, |x| {
         let a = morph(x * 2.0, patch.wave_a);
         let b = morph(x * 2.0 * 2.0_f32.powf(f32::from(patch.transpose_b) / 12.0), patch.wave_b);
@@ -176,20 +197,34 @@ fn lfo_graph(ui: &mut Ui, p: &Patch) {
     });
 }
 
-fn modes(ui: &mut Ui, label: &str, value: &mut u8, names: &[&str]) -> bool {
-    let old = *value;
+fn modes(ui: &mut Ui, label: &str, midi: &str, value: &mut u8, names: &[&str]) {
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(label).size(10.0).color(DIM));
+        midi_label(ui, RichText::new(label).size(10.0).color(DIM), midi);
         for (i, &name) in names.iter().enumerate() {
-            ui.selectable_value(value, i as u8, name);
+            ui.selectable_value(value, i as u8, name).midi_menu(ui, midi);
         }
     });
-    *value != old
 }
 
-fn matrix(ui: &mut Ui, p: &mut Patch) {
+fn menu_choice(ui: &mut Ui, id: &str, value: &mut u8, names: &[&str]) {
+    let selection = usize::from(*value).min(names.len()-1);
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(names[selection])
+        .show_ui(ui, |ui| {
+            for (n, &name) in names.iter().enumerate() {
+                ui.selectable_value(value, n as u8, name).midi_menu(ui, id);
+            }
+        })
+        .response.midi_menu(ui, id);
+}
+
+fn matrix(ui: &mut Ui, row: usize, p: &mut Patch) {
     const SOURCES: [&str; 7] = ["Off", "LFO", "Amp env", "Timbre", "Movement", "Width", "Space"];
-    const DESTINATIONS: [&str; 6] = ["Wave A", "Wave B", "Cutoff", "Balance", "Pitch", "Drive"];
+    let destinations = match p.osc_mode {
+        3 => ["FM index", "Feedback", "Cutoff", "Balance", "Pitch", "Drive"],
+        4 => ["Fold", "Sync", "Cutoff", "Wet mix", "Pitch", "Drive"],
+        _ => ["Wave A", "Wave B", "Cutoff", "Balance", "Pitch", "Drive"],
+    };
     let active = p.routes.iter().filter(|route| route.source != 0 && route.amount != 0.0).count();
     egui::CollapsingHeader::new(RichText::new(format!("Modulation matrix   {active} / 4")).monospace().color(LILAC))
         .show(ui, |ui| {
@@ -198,21 +233,11 @@ fn matrix(ui: &mut Ui, p: &mut Patch) {
                     for label in ["Source", "Destination", "Amount"] { ui.small(label); }
                     ui.end_row();
                     for (i, route) in p.routes.iter_mut().enumerate() {
-                        egui::ComboBox::from_id_salt(("route-src", i))
-                            .selected_text(SOURCES[usize::from(route.source).min(6)])
-                            .show_ui(ui, |ui| {
-                                for (n, &name) in SOURCES.iter().enumerate() {
-                                    ui.selectable_value(&mut route.source, n as u8, name);
-                                }
-                            });
-                        egui::ComboBox::from_id_salt(("route-dst", i))
-                            .selected_text(DESTINATIONS[usize::from(route.dest).min(5)])
-                            .show_ui(ui, |ui| {
-                                for (n, &name) in DESTINATIONS.iter().enumerate() {
-                                    ui.selectable_value(&mut route.dest, n as u8, name);
-                                }
-                            });
-                        ui.add(egui::Slider::new(&mut route.amount, -1.0..=1.0));
+                        let route_id = format!("route{}", i + 1);
+                        menu_choice(ui, &target(row, &format!("{route_id}.source")), &mut route.source, &SOURCES);
+                        menu_choice(ui, &target(row, &format!("{route_id}.dest")), &mut route.dest, &destinations);
+                        let amount = target(row, &format!("{route_id}.amount"));
+                        ui.add(crate::midi::slider(ui, &mut route.amount, -1.0..=1.0)).midi_menu(ui, &amount);
                         ui.end_row();
                     }
                 });
@@ -230,63 +255,101 @@ fn patch_panel(ui: &mut Ui, slot: &mut Slot, row: usize) -> (bool, bool) {
         ui.add_space(12.0);
         let current = usize::from(slot.preset).min(PRESETS.len()-1);
         let suffix = if PRESETS[current].1 == slot.patch { "" } else { " *" };
+        let preset_id = target(row, "preset");
         egui::ComboBox::from_id_salt(("sound-preset", row)).width(195.0)
             .selected_text(format!("{}{suffix}", PRESETS[current].0)).show_ui(ui, |ui| {
-                for (i, (name, _)) in PRESETS.iter().enumerate() {
-                    if ui.selectable_label(i == current, *name).clicked() {
-                        apply_preset(slot, i);
+                for (start, end, title) in [(0, EXPERIMENTAL_START, "Factory"), (EXPERIMENTAL_START, PRESETS.len(), "Experimental")] {
+                    if start != 0 { ui.separator(); }
+                    ui.strong(title);
+                    for (offset, (name, _)) in PRESETS[start..end].iter().enumerate() {
+                        let i = start + offset;
+                        if ui.selectable_label(i == current, *name).midi_menu(ui, &preset_id).clicked() {
+                            apply_preset(slot, i);
+                        }
                     }
                 }
-            });
-        audition = ui.button("Audition")
+            }).response.midi_menu(ui, &preset_id);
+        audition = ui.button("Audition").midi_menu(ui, &target(row, "audition"))
             .on_hover_text("Play the selected chord for three seconds.").clicked();
     });
     ui.add_space(5.0);
     let p = &mut slot.patch;
     ui.columns(2, |cols| {
         module(&mut cols[0], "OSCILLATORS", TEAL, |ui| {
-            oscillator_graph(ui, p);
-            modes(ui, "ENGINE", &mut p.osc_mode, &["Blend", "Ring", "Phase mod"]);
-            dials(ui, &mut [("Table A", &mut p.wave_a), ("Table B", &mut p.wave_b), ("Balance", &mut p.mix), ("Detune", &mut p.detune)], TEAL);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Osc B pitch").size(11.0).color(DIM));
-                ui.add(egui::DragValue::new(&mut p.transpose_b).range(-24..=24).suffix(" st"));
-            });
+            oscillator_graph(ui, p, slot.macros);
+            modes(ui, "ENGINE", &target(row, "osc_mode"), &mut p.osc_mode, &["Blend", "Ring", "Phase mod", "FM4", "Sync Fold"]);
+            match p.osc_mode {
+                3 => {
+                    modes(ui, "FM ROUTING", &target(row, "fm_algorithm"), &mut p.fm_algorithm, &["Cascade", "Pairs", "Fan", "Branch"]);
+                    let network = ["4 → 3 → 2 → 1", "2 → 1   +   4 → 3", "(2 + 3 + 4) → 1", "4 → (2 + 3) → 1"];
+                    ui.monospace(network[usize::from(p.fm_algorithm).min(3)]);
+                    ui.horizontal_wrapped(|ui| {
+                        for (n, ratio) in p.fm_ratios.iter_mut().enumerate() {
+                            let id = target(row, &format!("fm_ratio{}", n + 2));
+                            let drag = crate::midi::drag_value(ui, ratio).range(0.25..=12.0).speed(0.025)
+                                .fixed_decimals(2).prefix(format!("OP{} ×", n+2));
+                            ui.add(drag).midi_menu(ui, &id);
+                        }
+                    });
+                    dials(ui, row, &mut [
+                        ("fm_index", "Index", &mut p.fm_index),
+                        ("fm_feedback", "Feedback", &mut p.fm_feedback),
+                        ("mix", "Balance", &mut p.mix),
+                    ], TEAL);
+                }
+                4 => {
+                    dials(ui, row, &mut [
+                        ("fold", "Fold", &mut p.fold), ("sync", "Sync", &mut p.sync),
+                        ("mix", "Wet mix", &mut p.mix),
+                    ], TEAL);
+                }
+                _ => {
+                    dials(ui, row, &mut [
+                        ("wave_a", "Table A", &mut p.wave_a), ("wave_b", "Table B", &mut p.wave_b),
+                        ("mix", "Balance", &mut p.mix), ("detune", "Detune", &mut p.detune),
+                    ], TEAL);
+                    ui.horizontal(|ui| {
+                        let id = target(row,"transpose_b");
+                        midi_label(ui, RichText::new("Osc B pitch").size(11.0).color(DIM), &id);
+                        ui.add(crate::midi::drag_value(ui, &mut p.transpose_b).range(-24..=24).suffix(" st")).midi_menu(ui, &id);
+                    });
+                }
+            }
         });
         module(&mut cols[1], "MULTIMODE FILTER", ACID, |ui| {
             filter_graph(ui, p);
-            modes(ui, "MODE", &mut p.filter_mode, &["LP", "BP", "HP", "Notch"]);
-            dials(ui, &mut [("Cutoff", &mut p.cutoff), ("Resonance", &mut p.resonance), ("Env depth", &mut p.filter_env)], ACID);
+            modes(ui, "MODE", &target(row, "filter_mode"), &mut p.filter_mode, &["LP", "BP", "HP", "Notch"]);
+            dials(ui, row, &mut [("cutoff", "Cutoff", &mut p.cutoff), ("resonance", "Resonance", &mut p.resonance), ("filter_env", "Env depth", &mut p.filter_env)], ACID);
         });
     });
     ui.add_space(4.0);
     ui.columns(2, |cols| {
         module(&mut cols[0], "AMPLITUDE ENVELOPE", OCHRE, |ui| {
             envelope_graph(ui, p);
-            dials(ui, &mut [("Attack", &mut p.attack), ("Decay", &mut p.decay), ("Sustain", &mut p.sustain), ("Release", &mut p.release)], OCHRE);
+            dials(ui, row, &mut [("attack", "Attack", &mut p.attack), ("decay", "Decay", &mut p.decay), ("sustain", "Sustain", &mut p.sustain), ("release", "Release", &mut p.release)], OCHRE);
         });
         module(&mut cols[1], "MODULATION", LILAC, |ui| {
             lfo_graph(ui, p);
-            modes(ui, "WAVE", &mut p.lfo_shape, &["Sine", "Tri", "Ramp", "Square"]);
-            modes(ui, "TO", &mut p.lfo_target, &["Colour", "Filter", "Pitch", "Mix"]);
-            dials(ui, &mut [("Rate", &mut p.lfo_rate), ("Depth", &mut p.lfo_depth)], LILAC);
+            modes(ui, "WAVE", &target(row, "lfo_shape"), &mut p.lfo_shape, &["Sine", "Tri", "Ramp", "Square"]);
+            modes(ui, "TO", &target(row, "lfo_target"), &mut p.lfo_target, &["Colour", "Filter", "Pitch", "Mix"]);
+            dials(ui, row, &mut [("lfo_rate", "Rate", &mut p.lfo_rate), ("lfo_depth", "Depth", &mut p.lfo_depth)], LILAC);
         });
     });
     ui.add_space(4.0);
     ui.columns(2, |cols| {
         module(&mut cols[0], "CHARACTER", TEAL, |ui| {
-            dials(ui, &mut [("Sub", &mut p.sub), ("Drive", &mut p.drive), ("Chorus", &mut p.chorus)], TEAL);
+            dials(ui, row, &mut [("sub", "Sub", &mut p.sub), ("drive", "Drive", &mut p.drive), ("chorus", "Chorus", &mut p.chorus)], TEAL);
         });
         module(&mut cols[1], "PERFORMANCE MACROS", ACID, |ui| {
             ui.columns(4, |cols| {
                 for (i, (key, title)) in [("timbre","Timbre"),("movement","Movement"),("width","Width"),("space","Space")].into_iter().enumerate() {
                     let midi = format!("acidsynth{}.{key}", row+1);
-                    dial(&mut cols[i], title, &mut slot.macros[i], ACID, Some(&midi));
+                    dial(&mut cols[i], title, &mut slot.macros[i], ACID, &midi);
                 }
             });
         });
     });
-    matrix(ui, &mut slot.patch);
+    matrix(ui, row, &mut slot.patch);
     (before != slot.patch || initial_macros != slot.macros || initial_preset != slot.preset, audition)
 }
 
@@ -304,15 +367,7 @@ impl App {
                 (changed, audition) = patch_panel(ui, slot, row);
             });
         if audition {
-            let selected = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::unique(("acid-selected-step", row)))).unwrap_or(0);
-            let notes = slot.step(selected.min(slot.step_count()-1)).notes;
-            let notes = if notes.iter().any(|&note| note != 0) { notes } else { [48, 55, 60, 0] };
-            if let Some(link) = &mut self.link {
-                link.effect_command(orb_player::Command::AcidLive {
-                    slot: row,
-                    event: orb_engine::studio::acid_live::Event::Audition { notes, frames: 3 * 44_100 },
-                });
-            }
+            self.audition_acid_patch(row);
         }
         if changed {
             self.studio.changed();
@@ -320,6 +375,74 @@ impl App {
         }
         if !open {
             ui.ctx().data_mut(|d| d.insert_temp(id, None::<usize>));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_shapes(shape: &egui::Shape, labels: &mut Vec<(String, Pos2)>) {
+        match shape {
+            egui::Shape::Text(text) => {
+                let rect = text.galley.rect.translate(text.pos.to_vec2());
+                labels.push((text.galley.text().into(), rect.center()));
+            }
+            egui::Shape::Vec(shapes) => {
+                for child in shapes { text_shapes(child, labels); }
+            }
+            _ => {}
+        }
+    }
+
+    fn frame(ctx: &egui::Context, slot: &mut Slot, events: Vec<egui::Event>) -> Vec<(String, Pos2)> {
+        let mut interaction = (false, false);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(780.0, 1000.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| { interaction = patch_panel(ui, slot, 1); },
+        );
+        assert_eq!(interaction, (false, false), "secondary click edited or auditioned a patch");
+        let mut labels = Vec::new();
+        for clipped in &output.shapes { text_shapes(&clipped.shape, &mut labels); }
+        output.textures_delta.clear();
+        labels
+    }
+
+    #[test]
+    fn sound_editor_right_click_targets_the_slot_without_changing_the_patch() {
+        for (label, field, y_offset) in [
+            ("Table A", "wave_a", -27.0),
+            ("Ring", "osc_mode", 0.0),
+            ("Audition", "audition", 0.0),
+            (PRESETS[0].0, "preset", 0.0),
+        ] {
+            let ctx = egui::Context::default();
+            let mut slot = Slot::default();
+            let initial = slot.clone();
+            frame(&ctx, &mut slot, vec![]);
+            let labels = frame(&ctx, &mut slot, vec![]);
+            let (_, center) = labels.iter().find(|(name, _)| name == label)
+                .unwrap_or_else(|| panic!("missing {label}"));
+            let pos = *center + Vec2::new(0.0, y_offset);
+            frame(&ctx, &mut slot, vec![egui::Event::PointerMoved(pos)]);
+            for pressed in [true, false] {
+                frame(&ctx, &mut slot, vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: Default::default(),
+                }]);
+            }
+            let labels = frame(&ctx, &mut slot, vec![]);
+            assert!(labels.iter().any(|(name, _)| name == "MIDI LEARN..."), "{label}");
+            let expected = crate::midi::label(&target(1, field));
+            assert!(labels.iter().any(|(name, _)| name == &expected), "{label} / {expected}");
+            assert_eq!(slot, initial);
         }
     }
 }

@@ -1,7 +1,7 @@
 //! AcidSynth's live controls and polyphonic step editor for the two instrument slots.
 
 use super::{ACID, App, DIM, INK, NOTES, Rack, Ui, button, egui, mix_knob};
-use orb_engine::studio::acid_presets::PRESETS;
+use orb_engine::studio::acid_presets::{EXPERIMENTAL_START, PRESETS};
 use orb_engine::studio::acid_synth::{PhraseLength, Slot};
 
 const RATES: [(u16, &str); 5] = [
@@ -50,8 +50,7 @@ fn step_id(row: usize) -> egui::Id {
 }
 
 pub(super) fn apply_preset(slot: &mut Slot, index: usize) {
-    slot.preset = index as u8;
-    slot.patch = PRESETS[index].1;
+    slot.select_factory_preset(index);
 }
 
 impl App {
@@ -70,6 +69,12 @@ impl App {
                     .selected_text(PRESETS[preset].0)
                     .show_ui(ui, |ui| {
                         for (index, (name, _)) in PRESETS.iter().enumerate() {
+                            if index == 0 {
+                                ui.strong("Factory");
+                            } else if index == EXPERIMENTAL_START {
+                                ui.separator();
+                                ui.strong("Experimental");
+                            }
                             if ui.selectable_label(index == preset, *name).clicked() {
                                 apply_preset(slot, index);
                                 changed = true;

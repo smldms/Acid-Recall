@@ -11,6 +11,7 @@ use orb_ui::settings::Settings;
 
 fn config(target: &str, pickup: bool) -> Config {
     Config {
+        keyboard: Default::default(),
         clock: Default::default(),
         enabled: true,
         port: Some("UC-33 USB MIDI".into()),

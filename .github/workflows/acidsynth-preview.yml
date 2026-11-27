@@ -42,8 +42,12 @@ jobs:
         run: |
           foreach ($view in @('Low-Orbit','synth','chord')) {
             $shot = "acidsynth-preview/$view.png"
-            $flags = @('--demo', 'assets/demos/Low-Orbit.recall', '--size','1600x1000','--ppp','1','--screenshot',$shot)
-            if ($view -ne 'Low-Orbit') { $flags += @('--studio-view',$view) }
+            $flags = @('--size','1600x1000','--ppp','1','--screenshot',$shot)
+            if ($view -eq 'Low-Orbit') {
+              $flags += 'assets/demos/Low-Orbit.recall'
+            } else {
+              $flags += @('--demo','--studio-view',$view)
+            }
             $process = Start-Process -FilePath target/release/OpenRB-338.exe -WindowStyle Hidden -PassThru -ArgumentList $flags
             if (-not $process.WaitForExit(45000)) { Stop-Process -Id $process.Id }
             if (-not (Test-Path $shot)) { throw "Runner could not capture $view" }

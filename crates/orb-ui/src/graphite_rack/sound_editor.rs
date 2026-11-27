@@ -297,7 +297,7 @@ impl App {
         let mut audition = false;
         let slot = &mut self.studio.settings.synth_slots[row];
         egui::Window::new(format!("AcidSynth {} / Sound editor", ["A","B"][row]))
-            .open(&mut open).default_width(690.0).min_width(540.0).vscroll(true)
+            .open(&mut open).default_width(690.0).default_height(700.0).min_width(540.0).vscroll(true)
             .show(ui.ctx(), |ui| {
                 ui.visuals_mut().selection.bg_fill = Color32::from_rgb(56, 74, 71);
                 ui.visuals_mut().selection.stroke = Stroke::new(1.0, TEAL);

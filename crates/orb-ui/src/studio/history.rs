@@ -398,6 +398,22 @@ mod tests {
     }
 
     #[test]
+    fn idle_observation_keeps_history_and_ends_a_released_gesture() {
+        let mut app = App::new(crate::model::Panel::new(), None);
+        let ctx = Context::default();
+        app.studio.history.gesture = true;
+        for _ in 0..16 {
+            assert!(!app.sampler_history_poll(&ctx));
+        }
+        assert!(!app.studio.history.gesture);
+        assert!(app.studio.history.undo.is_empty());
+        app.studio.settings.lanes[3].steps[1023] = 100;
+        assert!(app.sampler_history_poll(&ctx));
+        assert!(!app.sampler_history_poll(&ctx));
+        assert_eq!(app.studio.history.undo.len(), 1);
+    }
+
+    #[test]
     fn drags_coalesce_redo_is_invalidated_and_assets_are_shared_and_bounded() {
         let mut ui = StudioUi::default();
         let original = SamplerState::capture(&ui);

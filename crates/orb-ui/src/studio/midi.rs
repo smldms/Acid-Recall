@@ -860,6 +860,25 @@ mod tests {
     }
 
     #[test]
+    fn consecutive_synth_ccs_coalesce_without_crossing_preset_changes() {
+        let mut app = App::new(Panel::new(), None);
+        for pos in (0..1000).step_by(8) {
+            app.panel.set_knob("acidsynth1.cutoff", pos);
+        }
+        app.panel.set_knob("acidsynth1.preset", 1000);
+        app.panel.set_knob("acidsynth1.cutoff", 127);
+        app.panel.set_knob("acidsynth1.cutoff", 500);
+        assert_eq!(app.panel.events.len(), 3);
+        app.route_studio_midi();
+        app.studio_finish(&eframe::egui::Context::default());
+        let slot = &app.studio.settings.synth_slots[0];
+        assert_eq!(usize::from(slot.preset), orb_engine::studio::acid_presets::PRESETS.len() - 1);
+        assert_eq!(slot.patch.cutoff, 64.0 / 127.0);
+        assert_eq!(app.panel.value("acidsynth1.cutoff"), Some(64));
+        assert!(app.doc.modified);
+    }
+
+    #[test]
     fn acidsynth_cc_routes_every_editor_field_independently_with_soft_takeover() {
         let mut app = App::new(Panel::new(), None);
         for row in 0..2 {

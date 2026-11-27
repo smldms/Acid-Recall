@@ -140,6 +140,7 @@ pub enum Command {
     Studio(Box<orb_engine::studio::Studio>),
     StudioClear,
     StudioSettings(Box<orb_engine::studio::Settings>),
+    AcidSound { slot: usize, sound: Box<orb_engine::studio::AcidSound> },
     StudioWave {
         lane: usize,
         wave: Option<Box<orb_engine::studio::audio_file::Wave>>,
@@ -324,6 +325,7 @@ impl ModSwap {
 pub enum Garbage {
     Studio(Box<orb_engine::studio::Studio>),
     StudioSettings(Box<orb_engine::studio::Settings>),
+    AcidSound(Box<orb_engine::studio::AcidSound>),
     StudioWave(Box<orb_engine::studio::audio_file::Wave>),
     StudioReverb(Box<orb_engine::studio::convolution::Convolver>),
     Engine(Box<Engine>),
@@ -992,6 +994,14 @@ impl Audio {
             }
             Command::StudioSettings(settings) => {
                 self.apply_studio_settings(orb_engine::studio::PreparedSettings::new(settings));
+            }
+            Command::AcidSound { slot, sound } => {
+                if let Some(studio) = &mut self.current.frame.studio
+                    && let Some(target) = studio.settings.synth_slots.get_mut(slot)
+                {
+                    sound.apply(target);
+                }
+                self.throw(Garbage::AcidSound(sound));
             }
             Command::StudioWave { lane, wave } => {
                 let old = if lane < 8

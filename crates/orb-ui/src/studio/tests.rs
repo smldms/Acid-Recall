@@ -68,6 +68,46 @@ fn setup() -> (App, Audio, Context) {
 }
 
 #[test]
+fn sound_sweeps_keep_the_runtime_settings_allocation_and_obey_full_update_order() {
+    let (mut app, mut audio, _) = setup();
+    let mut buffer = [0; CALL_FRAMES * 4];
+    let settings_ptr = |audio: &mut Audio| {
+        let studio = audio.current_mut().frame.studio.as_ref().unwrap();
+        std::ptr::from_ref(&*studio.settings)
+    };
+    let original = settings_ptr(&mut audio);
+    // Saturate the control queue. The link retains each update in order and retries at sync.
+    let link = app.link.as_mut().unwrap();
+    while link.player().send(Command::Tempo(128_000)).is_ok() {}
+    app.studio.settings.synth_slots[1].patch.cutoff = 0.17;
+    assert!(app.flush_studio_settings());
+    app.studio.settings.synth_slots[1].macros[0] = 0.72;
+    assert!(app.flush_studio_settings());
+    audio.render_i16(&mut buffer);
+    app.link.as_mut().unwrap().sync(&mut app.panel);
+    audio.render_i16(&mut buffer);
+    assert_eq!(settings_ptr(&mut audio), original);
+    {
+        let frame = &audio.current_mut().frame;
+        assert_eq!(frame.seq.globals.play, 0);
+        let slot = &frame.studio.as_ref().unwrap().settings.synth_slots[1];
+        assert_eq!((slot.patch.cutoff, slot.macros[0]), (0.17, 0.72));
+    }
+    app.studio.settings.synth_slots[1].patch.cutoff = 0.29;
+    app.studio.settings.lanes[7].steps[1023] = 100;
+    assert!(app.flush_studio_settings());
+    app.studio.settings.synth_slots[0].patch.cutoff = 0.83;
+    assert!(app.flush_studio_settings());
+    assert!(!app.flush_studio_settings());
+    audio.render_i16(&mut buffer);
+    assert_ne!(settings_ptr(&mut audio), original);
+    let s = &audio.current_mut().frame.studio.as_ref().unwrap().settings;
+    assert_eq!(s.lanes[7].steps[1023], 100);
+    assert_eq!(s.synth_slots[1].patch.cutoff, 0.29);
+    assert_eq!(s.synth_slots[0].patch.cutoff, 0.83);
+}
+
+#[test]
 fn silent_sampler_audition_publishes_positions_and_keeps_ui_repainting() {
     let (mut app, mut audio, _) = setup();
     app.studio_command(Command::StudioWave {

@@ -19,22 +19,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 7a99622a0925497d38aa7780e25296c1a55c0a45
-          path: alpha3
+          ref: c1fe3fa4f32d4c2d4d87995f0315e5897ecb5375
+          path: alpha5
       - name: Prepare ASIO and LLVM for both builds
         shell: pwsh
         run: . ./scripts/setup-asio.ps1
-      - name: Compare alpha 3 and current synth on the same Windows runner
+      - name: Compare alpha 5 and current synth on the same Windows runner
         shell: pwsh
         run: |
-          Copy-Item crates/orb-engine/examples/synth_benchmark.rs alpha3/crates/orb-engine/examples/
-          cargo build --release --locked --manifest-path alpha3/Cargo.toml -p orb-engine --example synth_benchmark
+          Copy-Item crates/orb-engine/examples/synth_benchmark.rs alpha5/crates/orb-engine/examples/
+          cargo build --release --locked --manifest-path alpha5/Cargo.toml -p orb-engine --example synth_benchmark
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --release --locked -p orb-engine --example synth_benchmark
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           foreach ($trial in 1..3) {
-            Write-Output "Alpha 3 trial $trial"
-            & ./alpha3/target/release/examples/synth_benchmark.exe
+            Write-Output "Alpha 5 trial $trial"
+            & ./alpha5/target/release/examples/synth_benchmark.exe
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             Write-Output "Current trial $trial"
             & ./target/release/examples/synth_benchmark.exe

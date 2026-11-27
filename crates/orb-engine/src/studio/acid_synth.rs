@@ -218,8 +218,7 @@ impl Slot {
     }
 
     pub fn sanitize(&mut self) {
-        self.macros = self.macros.map(unit);
-        self.preset = self.preset.min((super::acid_presets::PRESETS.len() - 1) as u8);
+        self.sanitize_sound();
         self.step_ticks = self.step_ticks.clamp(1, 768);
         self.length = self.length.valid();
         self.tail.truncate(MAX_STEPS - 16);
@@ -227,6 +226,12 @@ impl Slot {
             step.notes = step.notes.map(|n| n.min(127));
             step.gate_steps = step.gate_steps.clamp(1, MAX_STEPS as u16);
         }
+    }
+
+    /// Validate patch controls without traversing the stored phrase during live sound edits.
+    pub fn sanitize_sound(&mut self) {
+        self.macros = self.macros.map(unit);
+        self.preset = self.preset.min((super::acid_presets::PRESETS.len() - 1) as u8);
         let p = &mut self.patch;
         for v in [&mut p.wave_a, &mut p.wave_b, &mut p.detune, &mut p.mix,
                   &mut p.attack, &mut p.release, &mut p.cutoff, &mut p.resonance,
@@ -256,7 +261,24 @@ impl Slot {
 }
 
 /// Octave-banded additive tables. Allocated and generated only when preparing the Studio.
-pub(super) struct Bank(Box<[[[f32; TABLE + 1]; 4]]>);
+pub(super) struct Bank {
+    tables: Box<[[[f32; TABLE + 1]; 4]]>,
+    pitches: [(f32, usize); 128],
+}
+
+#[derive(Clone, Copy)]
+struct Shape {
+    index: usize,
+    blend: f32,
+}
+
+impl Shape {
+    fn new(value: f32) -> Self {
+        let y = value.clamp(0.0, 1.0) * 3.0;
+        let index = (y as usize).min(2);
+        Self { index, blend: y - index as f32 }
+    }
+}
 
 impl Bank {
     pub fn new() -> Self {
@@ -280,7 +302,12 @@ impl Bank {
             }
             for shape in shapes { shape[TABLE] = shape[0]; }
         }
-        Self(levels)
+        let pitches = std::array::from_fn(|note| {
+            let increment = 440.0 * 2.0_f32.powf((note as f32 - 69.0) / 12.0) / RATE;
+            let level = ((0.47 / increment).log2().floor() as usize).min(LEVELS - 1);
+            (increment, level)
+        });
+        Self { tables: levels, pitches }
     }
 
     fn sine(&self, phase: f32) -> f32 {
@@ -288,21 +315,49 @@ impl Bank {
         let x = phase * TABLE as f32;
         let whole = x as i32;
         let i = whole as usize & (TABLE - 1);
-        let sine = &self.0[0][0];
+        let sine = &self.tables[0][0];
         sine[i] + (sine[i + 1] - sine[i]) * (x - whole as f32)
     }
 
-    fn read(&self, level: usize, phase: f32, shape: f32) -> f32 {
+    fn read(&self, level: usize, phase: f32, shape: Shape) -> f32 {
         let x = phase * TABLE as f32;
         let i = x as usize;
-        let y = shape.clamp(0.0, 1.0) * 3.0;
-        let s = (y as usize).min(2);
-        let table = &self.0[level];
+        let table = &self.tables[level];
         let interp = |shape: usize| {
             table[shape][i] + (table[shape][i + 1] - table[shape][i]) * (x - i as f32)
         };
-        let a = interp(s);
-        a + (interp(s + 1) - a) * (y - s as f32)
+        let a = interp(shape.index);
+        a + (interp(shape.index + 1) - a) * shape.blend
+    }
+}
+
+struct Tuning {
+    pitch: f32,
+    detune: f32,
+    transpose: f32,
+    shift_a: usize,
+    shift_b: usize,
+    model: models::Controls,
+}
+
+#[derive(Default, Clone, Copy)]
+struct VoicePitch {
+    a: f32,
+    b: f32,
+    level_a: usize,
+    level_b: usize,
+    rates: models::Rates,
+}
+
+impl Tuning {
+    fn prepare(&self, increment: f32, level: usize) -> VoicePitch {
+        let a = increment * self.pitch;
+        VoicePitch {
+            a, b: a * self.detune * self.transpose,
+            level_a: level.saturating_sub(self.shift_a),
+            level_b: level.saturating_sub(self.shift_b),
+            rates: self.model.rates(a),
+        }
     }
 }
 
@@ -316,6 +371,7 @@ struct Voice {
     phase_b: f32,
     phase_sub: f32,
     model: models::State,
+    tuned: VoicePitch,
     decaying: bool,
     increment: f32,
     level: usize,
@@ -401,8 +457,7 @@ impl Instrument {
         }
     }
 
-    fn start_live_notes(&mut self) {
-        if !self.live.next.is_some_and(|next| next <= self.live.sample) { return; }
+    fn start_live_notes(&mut self, bank: &Bank, tuning: &Tuning) {
         let mut reserved = [false; VOICES];
         for pending in &mut self.live.notes {
             if !pending.is_some_and(|n| n.onset <= self.live.sample) { continue; }
@@ -411,7 +466,7 @@ impl Instrument {
                 self.voices.iter().enumerate().filter(|(i, _)| !reserved[*i]).min_by(|(_, a), (_, b)|
                     a.gain.total_cmp(&b.gain)).unwrap().0);
             reserved[index] = true;
-            let mut v = Self::voice(n.pitch, f64::INFINITY);
+            let mut v = Self::voice(bank, tuning, n.pitch, f64::INFINITY);
             v.velocity = f32::from(n.velocity) / 127.0;
             v.live_key = Some(n.key);
             v.live_delay = n.delay;
@@ -421,13 +476,13 @@ impl Instrument {
         self.live.refresh();
     }
 
-    fn voice(note: u8, end_tick: f64) -> Voice {
-        let increment = 440.0 * 2.0_f32.powf((f32::from(note) - 69.0) / 12.0) / RATE;
-        let level = ((0.47 / increment).log2().floor() as usize).min(LEVELS - 1);
-        Voice { increment, level, end_tick, velocity: 1.0, ..Voice::default() }
+    fn voice(bank: &Bank, tuning: &Tuning, note: u8, end_tick: f64) -> Voice {
+        let (increment, level) = bank.pitches[usize::from(note.min(127))];
+        let tuned = tuning.prepare(increment, level);
+        Voice { increment, level, tuned, end_tick, velocity: 1.0, ..Voice::default() }
     }
 
-    fn trigger(&mut self, step: Step, end_tick: f64) {
+    fn trigger(&mut self, bank: &Bank, tuning: &Tuning, step: Step, end_tick: f64) {
         let mut reserved = [false; VOICES];
         for (i, &note) in step.notes.iter().enumerate() {
             if note == 0 || step.notes[..i].contains(&note) { continue; }
@@ -436,7 +491,7 @@ impl Instrument {
                     .filter(|(i, _)| !reserved[*i])
                     .min_by(|(_, a), (_, b)| a.gain.total_cmp(&b.gain)).unwrap().0);
             reserved[index] = true;
-            self.voices[index] = Self::voice(note, end_tick);
+            self.voices[index] = Self::voice(bank, tuning, note, end_tick);
         }
     }
 
@@ -485,8 +540,8 @@ impl Instrument {
         let pitch = if semitones == 0.0 { 1.0 } else { 2.0_f32.powf(semitones / 12.0) };
         let mix = (p.mix + mix_offset + if p.lfo_target == 3 { 0.5 * lfo } else { 0.0 }).clamp(0.0, 1.0);
         let model = models::Controls::new(&p, color, [wave_a_offset, wave_b_offset], mix);
-        let wave_a = p.wave_a + color + wave_a_offset;
-        let wave_b = p.wave_b - 0.6 * color + wave_b_offset;
+        let wave_a = Shape::new(p.wave_a + color + wave_a_offset);
+        let wave_b = Shape::new(p.wave_b - 0.6 * color + wave_b_offset);
         let drive = (p.drive + drive_offset).clamp(0.0, 1.0);
         let transpose = 2.0_f32.powf(f32::from(p.transpose_b) / 12.0);
         let shift_a = (semitones.max(0.0) / 12.0).ceil() as usize;
@@ -502,25 +557,35 @@ impl Instrument {
         let a = 1.0 / (1.0 + g * (g + damp));
         let span = f64::from(slot.ticks_per_step());
         let count = slot.step_count();
+        let tuning = Tuning { pitch, detune, transpose, shift_a, shift_b, model };
+        for voice in &mut self.voices {
+            if voice.increment != 0.0 {
+                voice.tuned = tuning.prepare(voice.increment, voice.level);
+            }
+        }
+        let mut next_step_tick = tick;
         for (i, sample) in bus.iter_mut().enumerate() {
             let position = tick + i as f64 * advance;
-            if play && slot.enabled {
+            if play && slot.enabled && position >= next_step_tick {
                 let n = (position.max(0.0) / span).floor() as i64;
+                next_step_tick = (n + 1) as f64 * span;
                 if self.last_step.is_none() {
                     // Locate or enable mid-pattern: recover chords whose gates still span this step.
                     for previous in n.saturating_sub(count as i64 - 1).max(0)..n {
                         let step = slot.step(previous as usize % count);
                         let end = (previous as f64 + f64::from(step.gate_steps.min(count as u16))) * span;
-                        if end > position { self.trigger(step, end); }
+                        if end > position { self.trigger(bank, &tuning, step, end); }
                     }
                 }
                 if self.last_step != Some(n) {
                     let step = slot.step(n as usize % count);
-                    self.trigger(step, (n as f64 + f64::from(step.gate_steps.min(count as u16))) * span);
+                    self.trigger(bank, &tuning, step, (n as f64 + f64::from(step.gate_steps.min(count as u16))) * span);
                     self.last_step = Some(n);
                 }
             }
-            self.start_live_notes();
+            if self.live.next.is_some_and(|next| next <= self.live.sample) {
+                self.start_live_notes(bank, &tuning);
+            }
             let now = self.live.sample;
             self.live.sample += 1;
             let mut sum = 0.0;
@@ -542,24 +607,24 @@ impl Instrument {
                     v.gain *= release;
                     if v.gain < 0.00001 { v.increment = 0.0; continue; }
                 }
-                let inc_a = v.increment * pitch;
-                let inc_b = inc_a * detune * transpose;
+                let inc_a = v.tuned.a;
+                let inc_b = v.tuned.b;
                 let osc = if p.osc_mode >= 3 {
-                    v.model.sample(bank, &model, inc_a)
+                    v.model.sample(bank, &model, &v.tuned.rates)
                 } else {
-                    let level_b = v.level.saturating_sub(shift_b);
+                    let level_b = v.tuned.level_b;
                     let b = if inc_b < 0.49 { bank.read(level_b, v.phase_b, wave_b) } else { 0.0 };
                     let phase = if p.osc_mode == 2 {
                         (v.phase_a + b * mix * 0.22 + 1.0).fract()
                     } else { v.phase_a };
-                    let a = if inc_a < 0.49 { bank.read(v.level.saturating_sub(shift_a), phase, wave_a) } else { 0.0 };
+                    let a = if inc_a < 0.49 { bank.read(v.tuned.level_a, phase, wave_a) } else { 0.0 };
                     match p.osc_mode {
                         1 => a + (1.6 * a * b - a) * mix,
                         2 => a,
                         _ => a + (b-a) * mix,
                     }
                 };
-                let sub = if p.sub > 0.0 { bank.read(0, v.phase_sub, 0.0) * p.sub * 0.7 } else { 0.0 };
+                let sub = if p.sub > 0.0 { bank.sine(v.phase_sub) * p.sub * 0.7 } else { 0.0 };
                 sum += (osc + sub) * v.gain * v.velocity * 0.14;
                 v.phase_a = (v.phase_a + inc_a).fract();
                 v.phase_b = (v.phase_b + inc_b).fract();
@@ -582,7 +647,7 @@ impl Instrument {
             }
             self.chorus_line[self.chorus_index] = out;
             if p.chorus > 0.0 {
-                let delay = 520.0 + 150.0 * bank.read(0, self.chorus_phase, 0.0);
+                let delay = 520.0 + 150.0 * bank.sine(self.chorus_phase);
                 let whole = delay as usize;
                 let head = (self.chorus_index + 1024 - whole) & 1023;
                 let a = self.chorus_line[head];
@@ -727,13 +792,38 @@ mod tests {
     }
 
     #[test]
+    fn retune_applies_to_held_and_mid_block_live_voices() {
+        use super::super::acid_live::Event;
+        let bank = Bank::new();
+        let mut synth = Instrument::default();
+        let mut slot = Slot { enabled: true, sequence_enabled: false, patch: Patch::INIT, ..Slot::default() };
+        let mut block = [0.0; 64];
+        synth.live_event(Event::On { key: 1, pitch: 60, velocity: 127, grid: 0 }, 0.0, 0.0);
+        synth.render(&bank, &slot, &mut block, 0.0, 0.25, false);
+        assert_eq!(synth.voices[0].tuned.b, bank.pitches[60].0);
+        slot.patch.transpose_b = 12;
+        // Four frames before the next grid: the second key starts inside this block.
+        synth.live_event(Event::On { key: 2, pitch: 67, velocity: 127, grid: 48 }, 47.0, 0.25);
+        synth.render(&bank, &slot, &mut block, 47.0, 0.25, false);
+        for (voice, note) in synth.voices[..2].iter().zip([60, 67]) {
+            assert_eq!(voice.tuned.b, bank.pitches[note].0 * 2.0);
+        }
+        let mut expected_phase = 0.0_f32;
+        for _ in 0..60 { expected_phase = (expected_phase + bank.pitches[67].0 * 2.0).fract(); }
+        assert_eq!(synth.voices[1].phase_b, expected_phase);
+    }
+
+    #[test]
     fn stealing_voices_keeps_every_note_of_the_new_chord() {
         let mut synth = Instrument::default();
         for voice in &mut synth.voices {
             voice.increment = 0.01;
             voice.gain = 0.8;
         }
-        synth.trigger(Step { notes: [48, 52, 55, 59], gate_steps: 1 }, 192.0);
+        let bank = Bank::new();
+        let tuning = Tuning { pitch: 1.0, detune: 1.0, transpose: 1.0, shift_a: 0, shift_b: 0,
+            model: models::Controls::new(&Patch::INIT, 0.0, [0.0; 2], 0.5) };
+        synth.trigger(&bank, &tuning, Step { notes: [48, 52, 55, 59], gate_steps: 1 }, 192.0);
         assert_eq!(synth.voices.iter().filter(|v| v.end_tick == 192.0).count(), 4);
     }
 
@@ -778,8 +868,9 @@ fn draw_preview(bank: &Bank, patch: &Patch, macros: [f32; 4], samples: &mut [f32
     let controls = models::Controls::new(patch, (macros[0] - 0.5) * 0.5, offsets, mix);
     const FRAMES: usize = 401;
     let mut cycle = [0.0; FRAMES];
-    for _ in 0..201 { state.sample(bank, &controls, 220.0 / RATE); }
-    for value in &mut cycle { *value = state.sample(bank, &controls, 220.0 / RATE); }
+    let rates = controls.rates(220.0 / RATE);
+    for _ in 0..201 { state.sample(bank, &controls, &rates); }
+    for value in &mut cycle { *value = state.sample(bank, &controls, &rates); }
     let stride = (FRAMES - 1) as f32 / samples.len().saturating_sub(1).max(1) as f32;
     for (i, value) in samples.iter_mut().enumerate() {
         let x = (i as f32 * stride).min((FRAMES - 1) as f32);

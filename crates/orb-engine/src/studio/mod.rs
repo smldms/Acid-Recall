@@ -138,6 +138,27 @@ pub struct Studio {
 /// A replacement validated before it reaches the real-time thread.
 pub struct PreparedSettings(Box<Settings>);
 
+/// Validated sound controls only. No notes, drum banks or sampler data travel with this update.
+#[derive(Clone, Copy, PartialEq)]
+pub struct AcidSound {
+    patch: acid_synth::Patch,
+    macros: [f32; 4],
+    preset: u8,
+}
+
+impl AcidSound {
+    pub fn prepare(slot: &mut acid_synth::Slot) -> Self {
+        slot.sanitize_sound();
+        Self { patch: slot.patch, macros: slot.macros, preset: slot.preset }
+    }
+
+    pub fn apply(&self, slot: &mut acid_synth::Slot) {
+        slot.patch = self.patch;
+        slot.macros = self.macros;
+        slot.preset = self.preset;
+    }
+}
+
 impl PreparedSettings {
     pub fn new(mut settings: Box<Settings>) -> Self {
         settings.sanitize();

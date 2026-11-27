@@ -32,6 +32,25 @@ impl Controls {
     }
 }
 
+/// Phase increments and Nyquist rolloff stay constant until a note or block control changes.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Rates {
+    increments: [f32; 4],
+    gains: [f32; 4],
+}
+
+impl Controls {
+    pub fn rates(&self, increment: f32) -> Rates {
+        let delta = increment * 0.5;
+        let increments = match self.mode {
+            3 => [delta, delta * self.ratios[0], delta * self.ratios[1], delta * self.ratios[2]],
+            4 => [delta, delta * self.sync_ratio, 0.0, 0.0],
+            _ => return Rates::default(),
+        };
+        Rates { increments, gains: increments.map(rate_gain) }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub(super) struct State {
     phase: [f32; 4],
@@ -111,16 +130,14 @@ impl State {
         out
     }
 
-    pub fn sample(&mut self, bank: &Bank, c: &Controls, increment: f32) -> f32 {
-        let delta = increment * 0.5;
+    pub fn sample(&mut self, bank: &Bank, c: &Controls, rates: &Rates) -> f32 {
         let (even, odd) = if c.mode == 3 {
-            let increments = [delta, delta * c.ratios[0], delta * c.ratios[1], delta * c.ratios[2]];
-            let gains = increments.map(rate_gain);
+            let Rates { increments, gains } = *rates;
             let even = self.fm(bank, c, increments, gains);
             (even, self.fm(bank, c, increments, gains))
         } else {
-            let slave_delta = delta * c.sync_ratio;
-            let gain = rate_gain(slave_delta);
+            let [delta, slave_delta, _, _] = rates.increments;
+            let gain = rates.gains[1];
             let even = self.sync_fold(bank, c, delta, slave_delta, gain);
             (even, self.sync_fold(bank, c, delta, slave_delta, gain))
         };

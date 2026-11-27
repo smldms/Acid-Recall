@@ -259,7 +259,9 @@ fn the_callback_does_not_allocate() {
                 .collect(),
         }));
     }
+    let sound = Box::new(orb_engine::studio::AcidSound::prepare(&mut studio.settings.synth_slots[1]));
     send(&mut p, Command::Studio(studio));
+    send(&mut p, Command::AcidSound { slot: 1, sound });
     send(&mut p, Command::Locate(0));
     events += render(&mut a, &mut buf, 32);
     for _ in 0..3 {

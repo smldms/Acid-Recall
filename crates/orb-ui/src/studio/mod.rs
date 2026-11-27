@@ -359,10 +359,7 @@ impl App {
                 Ok(Completed::Init(studio, ir))
             });
         }
-        if self.studio.ready && self.studio.settings != self.studio.sent {
-            self.studio.settings.sanitize();
-            self.studio.sent = self.studio.settings.clone();
-            self.studio_command(Command::StudioSettings(Box::new(self.studio.sent.clone())));
+        if self.flush_studio_settings() {
             self.studio_mirror();
         } else if !self.studio.midi_mirror_state.as_ref().is_some_and(|(revision, duck)| {
             *revision == self.studio.revision && duck == &self.settings.sidechain
@@ -373,6 +370,36 @@ impl App {
             ctx.request_repaint_after(std::time::Duration::from_millis(40));
         }
         self.sampler_history_poll(ctx);
+    }
+
+    fn flush_studio_settings(&mut self) -> bool {
+        if !self.studio.ready || self.studio.settings == self.studio.sent {
+            return false;
+        }
+        let sounds: [Option<orb_engine::studio::AcidSound>; 2] = std::array::from_fn(|i| {
+            let slot = &mut self.studio.settings.synth_slots[i];
+            let sent = &mut self.studio.sent.synth_slots[i];
+            if slot.patch == sent.patch && slot.macros == sent.macros && slot.preset == sent.preset {
+                return None;
+            }
+            let sound = orb_engine::studio::AcidSound::prepare(slot);
+            sound.apply(sent);
+            Some(sound)
+        });
+        // After advancing the sound controls, any remaining difference requires a
+        // complete update (including simultaneous phrase, routing or sampler edits).
+        if self.studio.settings != self.studio.sent {
+            self.studio.settings.sanitize();
+            self.studio.sent = self.studio.settings.clone();
+            self.studio_command(Command::StudioSettings(Box::new(self.studio.sent.clone())));
+        } else {
+            for (slot, sound) in sounds.into_iter().enumerate() {
+                if let Some(sound) = sound {
+                    self.studio_command(Command::AcidSound { slot, sound: Box::new(sound) });
+                }
+            }
+        }
+        true
     }
 
     pub(crate) fn studio_open(&mut self, path: &Path, ctx: &Context) {

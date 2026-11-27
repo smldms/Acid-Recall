@@ -249,6 +249,7 @@ pub fn defaults() -> Vec<(String, u8)> {
 
 impl App {
     pub(crate) fn audition_acid_patch(&mut self, row: usize) {
+        self.flush_studio_settings();
         let slot = &self.studio.settings.synth_slots[row];
         if !slot.enabled {
             return;

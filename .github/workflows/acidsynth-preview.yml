@@ -1,0 +1,43 @@
+name: AcidSynth V2 Windows preview
+
+on:
+  push:
+    branches: [feature/v2-acidsynth]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acidsynth-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Prepare ASIO and LLVM
+        shell: pwsh
+        run: . ./scripts/setup-asio.ps1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - name: Build the desktop preview
+        run: cargo build --locked --release -p orb-ui
+      - name: Assemble portable preview
+        shell: pwsh
+        run: |
+          $out = New-Item -ItemType Directory -Path acidsynth-preview
+          Copy-Item target/release/OpenRB-338.exe "$out/ACID-RECALL-V2-Preview.exe"
+          Copy-Item LICENSE "$out/LICENSE"
+          Copy-Item docs/LICENSE-SYMPHONIA.txt "$out/LICENSE-SYMPHONIA.txt"
+          Copy-Item .build-tools/asio/sdk/ASIOSDK/LICENSE.txt "$out/LICENSE-ASIO-SDK.txt"
+          New-Item -ItemType Directory -Path "$out/sources"
+          Copy-Item .build-tools/asio/ASIO-SDK_2.3.4_2025-10-15.zip "$out/sources/"
+          "V2 AcidSynth preview - ${{ github.sha }}" | Set-Content "$out/VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ACID-RECALL-V2-AcidSynth-Windows-x64
+          path: acidsynth-preview/
+          if-no-files-found: error
+      - name: Run engine, player and interface tests
+        run: cargo test --locked -p orb-engine -p orb-player -p orb-ui --no-fail-fast

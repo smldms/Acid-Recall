@@ -245,10 +245,11 @@ mod tests {
                     modifiers: Default::default(),
                 });
             }
-            let _ = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput { screen_rect: Some(canvas), events, ..Default::default() },
                 |ui| { app.graphite_rack(ui, canvas); },
             );
+            output.textures_delta.clear();
         }
     }
 

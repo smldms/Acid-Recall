@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn all_studio_controls_are_registered_with_correct_midi_behavior() {
-        assert_eq!(controls().len(), 249);
+        assert_eq!(controls().len(), 249 + 2 * SYNTH_MACROS.len());
         for (id, _) in controls() {
             assert!(kind(&id).is_some(), "{id}");
             assert!(Panel::new().value(&id).is_some(), "{id}");

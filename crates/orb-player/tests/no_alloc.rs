@@ -203,6 +203,11 @@ fn the_callback_does_not_allocate() {
     let ir = orb_engine::studio::convolution::synthetic(0, 0.15);
     let convolver = || Box::new(orb_engine::studio::convolution::Convolver::new(&ir).unwrap());
     let mut studio = Box::new(orb_engine::studio::Studio::new(convolver()));
+    for slot in &mut studio.settings.synth_slots {
+        slot.enabled = true;
+        slot.steps[0].notes = [48, 55, 58, 62];
+        slot.steps[0].gate_steps = 16;
+    }
     studio.settings.sends = [0.3; 4];
     studio.settings.sampler_bus.dist = true;
     studio.settings.sampler_bus.delay = 0.3;

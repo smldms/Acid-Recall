@@ -1,5 +1,7 @@
 //! Optional Studio instruments and convolution send. Legacy frames have no Studio instance.
 
+pub mod acid_synth;
+pub mod acid_presets;
 pub mod audio_file;
 mod bus;
 pub use bus::SamplerBusSettings;
@@ -42,6 +44,8 @@ fn clean(value: f64) -> f64 {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub synth_slots: [acid_synth::Slot; 2],
     /// Shared immutable banks; replacements retain the old bank until UI garbage collection.
     #[serde(default)]
     pub drum_patterns: [std::sync::Arc<drums::Bank>; 2],
@@ -63,6 +67,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            synth_slots: Default::default(),
             drum_patterns: std::array::from_fn(|_| std::sync::Arc::default()),
             drum_gain_db: [0.0; 2],
             sampler_bus: SamplerBusSettings::default(),
@@ -80,6 +85,7 @@ impl Default for Settings {
 
 impl Settings {
     pub fn sanitize(&mut self) {
+        for slot in &mut self.synth_slots { slot.sanitize(); }
         self.sampler_bus.sanitize();
         fn finite(v: f64, lo: f64, hi: f64) -> f64 {
             if v.is_finite() { v.clamp(lo, hi) } else { lo }
@@ -104,6 +110,8 @@ impl Settings {
 }
 
 pub struct Studio {
+    synth_bank: acid_synth::Bank,
+    synths: [acid_synth::Instrument; 2],
     meters: [meter::Meter; 8],
     drum_gain: [f64; 2],
     pub settings: Box<Settings>,
@@ -130,6 +138,8 @@ impl Studio {
     /// Prepare on a worker/UI thread, then transfer the box to the player.
     pub fn new(convolver: Box<Convolver>) -> Self {
         Self {
+            synth_bank: acid_synth::Bank::new(),
+            synths: Default::default(),
             drum_gain: [1.0; 2],
             meters: Default::default(),
             settings: Box::default(),
@@ -178,6 +188,22 @@ impl Studio {
             self.fade = 4410;
         }
         old
+    }
+
+    pub(crate) fn synth_channel(&mut self, c: usize, bus: &mut crate::frame::Block, tick: f64, advance: f64, play: bool) {
+        if c < 2 {
+            self.synths[c].render(&self.synth_bank, &self.settings.synth_slots[c], bus, tick, advance, play);
+        }
+    }
+
+    pub(crate) fn synth_spread(&mut self, c: usize, sample: f32) -> f64 {
+        if c < 2 && self.settings.synth_slots[c].enabled {
+            self.synths[c].spread(sample, self.settings.synth_slots[c].macros[2])
+        } else { 0.0 }
+    }
+
+    pub(crate) fn synth_gate(&self, c: usize, tick: f64, native: bool) -> bool {
+        if self.settings.synth_slots[c].enabled { self.synths[c].gate(tick) } else { native }
     }
 
     pub fn begin(&mut self) {
@@ -235,7 +261,11 @@ impl Studio {
         self.meters[channel].sample(left);
         self.meters[channel].sample(right);
         let target = if self.settings.enabled {
-            self.settings.sends[channel]
+            let send = self.settings.sends[channel];
+            if channel < 2 && self.settings.synth_slots[channel].enabled {
+                let space = f64::from(self.settings.synth_slots[channel].macros[3]);
+                send + (1.0 - send) * space
+            } else { send }
         } else {
             0.0
         };

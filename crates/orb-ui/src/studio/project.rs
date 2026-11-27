@@ -8,6 +8,7 @@ use orb_engine::studio::{Settings, Studio, convolution::Convolver};
 use serde::{Deserialize, Serialize};
 
 const MAGIC: &[u8; 8] = b"ORB338S2";
+const SYNTH_MAGIC: &[u8; 8] = b"ORB338S3";
 const MAX_BYTES: usize = 256 * 1024 * 1024;
 
 /// New projects use .recall; the original Studio extension remains fully supported.
@@ -81,7 +82,15 @@ impl Project {
         if self.ir.frames.len() > 6 * 44100 {
             return Err("Impulse response exceeds six seconds".into());
         }
-        let mut out = MAGIC.to_vec();
+        // Older readers ignore unknown TOML fields. Refuse that lossy round trip
+        // once either instrument slot contains music or a customised dormant patch.
+        let has_synth_data = self
+            .metadata
+            .settings
+            .synth_slots
+            .iter()
+            .any(|slot| *slot != Default::default());
+        let mut out = if has_synth_data { SYNTH_MAGIC } else { MAGIC }.to_vec();
         let metadata = toml::to_string(&self.metadata).map_err(|e| e.to_string())?;
         put(&mut out, metadata.as_bytes())?;
         put(&mut out, &self.song)?;
@@ -104,8 +113,9 @@ impl Project {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() > MAX_BYTES || bytes.get(..8) != Some(MAGIC) {
-            return Err("Not a supported Studio project (ORB338S2)".into());
+        if bytes.len() > MAX_BYTES || !(bytes.starts_with(MAGIC) || bytes.starts_with(SYNTH_MAGIC))
+        {
+            return Err("Not a supported Studio project (ORB338S2 or ORB338S3)".into());
         }
         let mut bytes = &bytes[8..];
         let mut metadata: Metadata = toml::from_str(
@@ -197,6 +207,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn low_orbit_demo_loads_its_four_bar_chord_into_the_runtime() {
+        let project = Project::decode(include_bytes!("../../../../assets/demos/Low-Orbit.recall"))
+            .unwrap();
+        let runtime = project.prepare().unwrap();
+        let [bass, pad] = &runtime.settings.synth_slots;
+        assert!(!bass.enabled && pad.enabled);
+        assert_eq!(pad.steps[0].notes, [50, 57, 65, 76]);
+        assert_eq!(u16::from(pad.steps[0].gate_steps) * pad.step_ticks, 4 * 768);
+    }
+
+    #[test]
     fn bank_budget_counts_all_lanes_without_imposing_a_duration_limit() {
         assert!(validate_bank([44100 * 181, 44100 * 181]).is_ok());
         assert!(validate_bank([MAX_FRAMES]).is_ok());
@@ -229,10 +250,39 @@ mod tests {
             }),
         };
         let bytes = project.encode().unwrap();
+        assert!(bytes.starts_with(MAGIC));
         let loaded = Project::decode(&bytes).unwrap();
         assert_eq!(loaded.metadata.settings, project.metadata.settings);
         assert_eq!(loaded.ir.frames, project.ir.frames);
         assert_eq!(loaded.metadata.closed_hat, Some(37));
+        // Reconstruct the older checksummed container, whose settings predate rack slots.
+        let mut sections = &bytes[MAGIC.len()..];
+        let mut old_metadata: toml::Table =
+            toml::from_str(std::str::from_utf8(take(&mut sections, MAX_BYTES).unwrap()).unwrap())
+                .unwrap();
+        let old_settings = old_metadata
+            .get_mut("settings")
+            .unwrap()
+            .as_table_mut()
+            .unwrap();
+        old_settings.remove("synth_slots");
+        let mut legacy_bytes = MAGIC.to_vec();
+        put(
+            &mut legacy_bytes,
+            toml::to_string(&old_metadata).unwrap().as_bytes(),
+        )
+        .unwrap();
+        legacy_bytes.extend_from_slice(sections);
+        let legacy = Project::decode(&legacy_bytes).unwrap();
+        assert!(
+            legacy
+                .metadata
+                .settings
+                .synth_slots
+                .iter()
+                .all(|slot| !slot.enabled)
+        );
+        assert_eq!(legacy.metadata.settings, project.metadata.settings);
         let mut broken = bytes.clone();
         *broken.last_mut().unwrap() ^= 1;
         assert!(Project::decode(&broken).is_err());

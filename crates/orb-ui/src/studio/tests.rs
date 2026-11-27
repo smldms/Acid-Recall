@@ -155,6 +155,13 @@ fn save_and_open_restore_embedded_sample_last_step_and_mix_settings() {
         let path = folder.path().join(format!("session.{extension}"));
         app.studio.settings.lanes[7].bars = 64;
         app.studio.settings.lanes[7].steps[1023] = 117;
+        // A dormant patch belongs to its slot even while that slot plays its TB.
+        app.studio.settings.synth_slots[0].macros[1] = 0.75;
+        let synth = &mut app.studio.settings.synth_slots[1];
+        synth.enabled = true;
+        synth.steps[0].notes = [48, 55, 62, 67];
+        synth.steps[0].gate_steps = 4;
+        let expected_slots = app.studio.settings.synth_slots.clone();
         app.studio.settings.return_gain = 0.73;
         app.studio.settings.sampler_bus.gain = 0.42;
         app.studio.settings.sampler_bus.dist = true;
@@ -179,13 +186,15 @@ fn save_and_open_restore_embedded_sample_last_step_and_mix_settings() {
         finish(&mut app, &mut audio, &ctx);
         assert!(app.studio.notice.is_none(), "{:?}", app.studio.notice);
         assert!(path.is_file());
-        assert!(std::fs::read(&path).unwrap().starts_with(b"ORB338S2"));
+        assert!(std::fs::read(&path).unwrap().starts_with(b"ORB338S3"));
         assert!(!app.doc.modified);
         app.studio.settings.lanes[7].steps[1023] = 0;
+        app.studio.settings.synth_slots = Default::default();
         app.open_now(&path);
         assert!(app.studio.opening);
         finish(&mut app, &mut audio, &ctx);
         assert_eq!(app.studio.settings.lanes[7].steps[1023], 117);
+        assert_eq!(app.studio.settings.synth_slots, expected_slots);
         assert!(app.studio.settings.lanes[7].reverse);
         assert!(app.studio.settings.lanes[7].warp);
         assert_eq!(app.studio.settings.lanes[7].warp_bpm, 137.5);

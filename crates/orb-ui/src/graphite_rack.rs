@@ -6,6 +6,8 @@ use crate::app::App;
 use crate::layout;
 use crate::midi::MidiMenu;
 
+mod acid_synth;
+
 pub const WIDTH: f32 = 1760.0;
 pub const HEIGHT: f32 = 1300.0;
 const ACID: Color32 = Color32::from_rgb(190, 215, 126);
@@ -458,26 +460,37 @@ impl App {
                         BORDER
                     },
                 );
-                rack.text(ui, 30.0, y + 19.0, 16.0, MACHINES[row], INK);
-                rack.text(
-                    ui,
-                    206.0,
-                    y + 19.0,
-                    8.0,
-                    if row < 2 {
-                        "BASS SYNTHESIZER"
-                    } else {
-                        "RHYTHM COMPOSER"
-                    },
-                    DIM,
-                );
+                let acid_slot = row < 2 && self.studio.settings.synth_slots[row].enabled;
+                let machine = if acid_slot {
+                    ["AcidSynth A", "AcidSynth B"][row]
+                } else {
+                    MACHINES[row]
+                };
+                rack.text(ui, 30.0, y + 19.0, 16.0, machine, INK);
+                if row < 2 {
+                    if button(
+                        ui, rack, rack.rect(140.0, y + 9.0, 73.0, 19.0),
+                        (row, "instrument"), if acid_slot { "TB-303" } else { "AcidSynth" }, false,
+                    ).on_hover_text("Switch instrument in this slot").clicked() {
+                        self.studio.settings.synth_slots[row].enabled = !acid_slot;
+                        self.panel.focus = row;
+                        self.studio.changed();
+                        self.doc.modified = true;
+                    }
+                } else {
+                    rack.text(ui, 206.0, y + 19.0, 8.0, "RHYTHM COMPOSER", DIM);
+                }
+                self.rack_mixer(ui, rack, row, y);
+                if acid_slot {
+                    self.rack_acid_synth(ui, rack, row, y);
+                    continue;
+                }
                 self.rack_patterns(ui, rack, row, y);
                 if row < 2 {
                     self.rack_tb(ui, rack, row, y);
                 } else {
                     self.rack_tr(ui, rack, row, y);
                 }
-                self.rack_mixer(ui, rack, row, y);
                 if button(
                     ui,
                     rack,
@@ -1327,6 +1340,10 @@ impl App {
         let Some(row) = ui.ctx().data(|d| d.get_temp::<Option<usize>>(id)).flatten() else {
             return;
         };
+        if row < 2 && self.studio.settings.synth_slots[row].enabled {
+            self.acid_editor(ui, row, id);
+            return;
+        }
         let title = if row < 4 {
             format!("{} / Detailed editor", MACHINES[row])
         } else {

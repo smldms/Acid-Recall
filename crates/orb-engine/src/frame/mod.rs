@@ -1001,9 +1001,14 @@ impl Frame {
             tick: self.seq.tick_pos(),
             stack_word: None,
         };
+        let advance = f64::from(self.seq.globals.tempo) * crate::seq::TEMPO_STEP / BLOCK as f64;
+        let start_tick = (self.seq.pos - advance * BLOCK as f64).max(0.0);
         let bus = &mut self.bus;
         for (c, ch) in self.state.channels.iter_mut().enumerate() {
             self.devices.channels[c].process(bus, &ctx);
+            if let Some(studio) = &mut self.studio {
+                studio.synth_channel(c, bus, start_tick, advance, self.seq.globals.play != 0);
+            }
             // the word the audio slot leaves at its esp0 - 0x1C (the 303s leave the slot as it
             // was); the distortion (0x10010A50: no local there, calls only below its esp) leaves
             // it for the PCF after it
@@ -1063,11 +1068,15 @@ impl Frame {
             for i in (0..BLOCK).step_by(2) {
                 for j in i..i + 2 {
                     let b = bus[j] as f64;
-                    l[j] = st(b * gl + l[j] as f64);
-                    r[j] = st(b * gr + r[j] as f64);
+                    let (mut left, mut right) = (b * gl, b * gr);
                     if let Some(studio) = &mut self.studio {
-                        studio.channel(c, j, b * gl, b * gr);
+                        let side = studio.synth_spread(c, bus[j]);
+                        left += side * gl;
+                        right -= side * gr;
+                        studio.channel(c, j, left, right);
                     }
+                    l[j] = st(left + l[j] as f64);
+                    r[j] = st(right + r[j] as f64);
                 }
                 gl += dl;
                 gr += dr;
@@ -1076,7 +1085,7 @@ impl Frame {
         if let Some(studio) = &mut self.studio {
             let advance = f64::from(self.seq.globals.tempo) * f64::from_bits(0x3ED3_7A72_81B2_2126)
                 / BLOCK as f64;
-            let gates = std::array::from_fn(|i| self.devices.channels[i].gate_open());
+            let gates = std::array::from_fn(|i| studio.synth_gate(i, self.seq.pos, self.devices.channels[i].gate_open()));
             let drum_triggers = std::array::from_fn(|d| {
                 std::array::from_fn(|voice| {
                     self.devices.channels[d + 2]

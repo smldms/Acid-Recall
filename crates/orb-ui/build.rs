@@ -115,7 +115,8 @@ fn embed_windows_resources(manifest: &Path, version: &str) {
         ico.display()
     );
     println!("cargo:rerun-if-changed={}", ico.display());
-    let n: Vec<&str> = version.split('.').collect();
+    let core = version.split(['-', '+']).next().unwrap_or(version);
+    let n: Vec<&str> = core.split('.').collect();
     assert_eq!(n.len(), 3, "version {version}");
     let part = |s: &str| s.parse::<u32>().unwrap();
     let nums = format!("{},{},{},0", part(n[0]), part(n[1]), part(n[2]));

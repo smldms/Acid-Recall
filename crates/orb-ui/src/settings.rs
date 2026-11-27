@@ -7,7 +7,7 @@
 //! or Export, and of the last mod; task-144), `startup_sound` (a bool) and the table
 //! `preferred_mods` (an INFO name to the file name preferred among mods that share it,
 //! task-151), so it can be edited by hand. Where it lives: `$ORB_UI_CONFIG` if set; else
-//! `OpenRB-338/ui.toml` in the platform's configuration folder (`$XDG_CONFIG_HOME`, or
+//! `ACID-RECALL-V2/ui.toml` in the platform's configuration folder (`$XDG_CONFIG_HOME`, or
 //! `~/.config` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%` on Windows).
 //! Reading never fails: a missing or damaged file gives the defaults (a damaged file stays as
 //! it is until the next save), a key of the wrong type is skipped and the others kept, and
@@ -114,7 +114,7 @@ pub fn default_file() -> Option<PathBuf> {
     } else {
         home().map(|h| h.join(".config"))
     };
-    base.map(|b| b.join("OpenRB-338").join("ui.toml"))
+    base.map(|b| b.join("ACID-RECALL-V2").join("ui.toml"))
 }
 
 /// What the file holds, in the file's order.

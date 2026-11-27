@@ -6,8 +6,28 @@ use orb_engine::studio::{
 };
 use orb_player::Command;
 
+const SYNTH_MACROS: [&str; 4] = ["timbre", "movement", "width", "space"];
+
+fn synth_macro(id: &str) -> Option<(usize, usize)> {
+    let (slot, name) = id.split_once('.')?;
+    let row = match slot {
+        "acidsynth1" => 0,
+        "acidsynth2" => 1,
+        _ => return None,
+    };
+    Some((row, SYNTH_MACROS.iter().position(|&field| field == name)?))
+}
+
 pub fn controls() -> Vec<(String, String)> {
     let mut out = Vec::new();
+    for (row, slot) in ["A", "B"].iter().enumerate() {
+        for name in SYNTH_MACROS {
+            out.push((
+                format!("acidsynth{}.{name}", row + 1),
+                format!("AcidSynth {slot} / {name}"),
+            ));
+        }
+    }
     for (name, label) in [
         ("enabled", "Enabled"),
         ("return", "Return"),
@@ -184,6 +204,9 @@ fn lane_value(lane: &Lane, name: &str) -> f64 {
 }
 
 fn value(settings: &Settings, id: &str) -> f64 {
+    if let Some((row, index)) = synth_macro(id) {
+        return f64::from(settings.synth_slots[row].macros[index]);
+    }
     match id {
         "studio.enabled" => f64::from(u8::from(settings.enabled)),
         "studio.return" => settings.return_gain,
@@ -269,6 +292,10 @@ impl App {
                 continue;
             }
             let s = &mut self.studio.settings;
+            if let Some((row, index)) = synth_macro(id) {
+                s.synth_slots[row].macros[index] = v as f32;
+                continue;
+            }
             match id.as_str() {
                 "studio.enabled" => s.enabled = raw >= 64,
                 "studio.return" => s.return_gain = v,
@@ -773,6 +800,20 @@ mod tests {
         assert_eq!(lane.sidechain_instrument, 1);
         assert_eq!(lane.gater_source, 0);
         assert_eq!(lane.gater_instrument, 1);
+    }
+
+    #[test]
+    fn acidsynth_macro_cc_preserves_the_other_slot_and_mirrors_pickup() {
+        let mut app = App::new(Panel::new(), None);
+        let mut router = Router::default();
+        let original = app.studio.settings.synth_slots[0].macros;
+        for (index, name) in SYNTH_MACROS.iter().enumerate() {
+            let id = format!("acidsynth2.{name}");
+            move_cc(&mut app, &mut router, &id, 97, false);
+            assert_eq!(app.panel.value(&id), Some(97));
+            assert_eq!(app.studio.settings.synth_slots[1].macros[index], 97.0 / 127.0);
+        }
+        assert_eq!(app.studio.settings.synth_slots[0].macros, original);
     }
 
     #[test]

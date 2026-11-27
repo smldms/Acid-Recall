@@ -322,8 +322,6 @@ pub(super) struct Bank {
 struct Shape {
     index: usize,
     blend: f32,
-    tb_gain: f32,
-    pub(super) dry: Block,
 }
 
 impl Shape {
@@ -441,6 +439,8 @@ pub(super) struct Instrument {
     last_step: Option<i64>,
     last_tick: Option<f64>,
     blend: f32,
+    tb_gain: f32,
+    pub(super) dry: Block,
     lfo: f32,
     low: f32,
     band: f32,

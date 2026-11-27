@@ -148,6 +148,7 @@ pub enum Command {
     },
     StudioReverb(Box<orb_engine::studio::convolution::Convolver>),
     StudioAudition(usize),
+    AcidLive { slot: usize, event: orb_engine::studio::acid_live::Event },
     /// Independent closed-hat level; None preserves the legacy shared control.
     ClosedHatLevel(Option<u8>),
     /// Global optional kick ducking, applied to current and pending songs.
@@ -966,6 +967,16 @@ impl Audio {
             Command::StudioAudition(lane) => {
                 if let Some(studio) = &mut self.current.frame.studio {
                     studio.sampler.audition(lane);
+                }
+            }
+            Command::AcidLive { slot, event } => {
+                let frame = &mut self.current.frame;
+                let advance = if frame.seq.globals.play != 0 {
+                    f64::from(frame.seq.globals.tempo) * orb_engine::seq::TEMPO_STEP
+                        / orb_engine::frame::BLOCK as f64
+                } else { 0.0 };
+                if let Some(studio) = &mut frame.studio {
+                    studio.live_note(slot, event, frame.seq.pos, advance);
                 }
             }
             Command::ClosedHatLevel(level) => {

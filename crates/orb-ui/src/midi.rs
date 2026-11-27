@@ -2,7 +2,7 @@
 //!
 //! The first device backend is Windows WinMM (no extra driver or Rust dependency). Mapping
 //! is platform independent and uses the same Panel events as mouse edits. A dedicated worker
-//! handles MIDI Clock independently from GUI updates. Live instrument notes are not handled.
+//! handles MIDI Clock independently from GUI updates. Keyboard notes address AcidSynth slots.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -15,6 +15,7 @@ use crate::layout;
 use crate::model::Panel;
 
 mod context;
+pub mod keyboard;
 pub mod preset;
 pub mod sync;
 pub(crate) use context::{MidiMenu, drag_value, slider};
@@ -142,6 +143,7 @@ pub struct InputSettings {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub keyboard: keyboard::Keyboard,
     pub clock: sync::Config,
     pub enabled: bool,
     pub port: Option<String>,
@@ -159,6 +161,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            keyboard: keyboard::Keyboard::default(),
             clock: sync::Config::default(),
             enabled: false,
             port: None,
@@ -175,6 +178,7 @@ impl Default for Config {
 impl Config {
     /// Keep valid assignments only. A source and a target each have one owner; last wins.
     pub fn sanitize(&mut self) {
+        self.keyboard.sanitize();
         self.clock.output_delay_ms = self.clock.output_delay_ms.min(500);
         self.clock.input_offset_ms = self.clock.input_offset_ms.clamp(-500, 500);
         for port in [&mut self.clock.input, &mut self.clock.output] {
@@ -713,8 +717,31 @@ impl Midi {
 }
 
 impl App {
+    pub(crate) fn acid_keyboard_word(&mut self, input: u8, word: u32) {
+        let keyboard = &self.settings.midi.keyboard;
+        let Some((channel, event)) = keyboard.decode(input, word) else { return; };
+        if let Some(link) = &mut self.link {
+            for (slot, &target) in keyboard.channels.iter().enumerate() {
+                if target == channel && self.studio.settings.synth_slots[slot].enabled {
+                    link.effect_command(orb_player::Command::AcidLive { slot, event });
+                }
+            }
+        }
+    }
+
+    fn release_keyboard(&mut self) {
+        if let Some(link) = &mut self.link {
+            for slot in 0..2 {
+                link.effect_command(orb_player::Command::AcidLive {
+                    slot, event: orb_engine::studio::acid_live::Event::Panic,
+                });
+            }
+        }
+    }
+
     /// Reconnect the same saved MIDI ports after a potentially slow audio-driver change.
     pub(crate) fn pause_midi_for_audio_change(&mut self) {
+        self.release_keyboard();
         self.midi.inputs.clear();
         self.midi.clock_input = None;
         self.midi.clock.stop();
@@ -788,6 +815,7 @@ impl App {
             return;
         }
         let mut words = Vec::new();
+        let mut overflow = false;
         for active in &mut self.midi.inputs {
             words.extend(
                 active
@@ -798,6 +826,7 @@ impl App {
             );
             let dropped = active.input.dropped();
             if dropped > active.dropped_seen {
+                overflow = true;
                 active.dropped_seen = dropped;
                 self.midi.error = Some(format!(
                     "Input {} overflow: {dropped} messages dropped.",
@@ -810,14 +839,15 @@ impl App {
         ctx.request_repaint_after(std::time::Duration::from_millis(8));
         let now = ctx.input(|i| i.time);
         let mut learned = false;
-        for (input, cc) in words
-            .into_iter()
-            .filter_map(|(slot, word)| Cc::decode(word).map(|cc| (slot, cc)))
-        {
-            learned |=
+        for (input, word) in words {
+            if !overflow { self.acid_keyboard_word(input, word); }
+            if let Some(cc) = Cc::decode(word) {
+                learned |=
                 self.midi
                     .handle_cc_from(input, cc, &mut self.settings.midi, &mut self.panel, now);
+            }
         }
+        if overflow { self.release_keyboard(); }
         if learned {
             self.save_midi();
         }
@@ -836,17 +866,22 @@ impl App {
         let mut open = true;
         let mut changed = false;
         let mut reconnect = false;
+        let mut release = false;
         let mut remove = None;
         let mut import = false;
+        let mut recover = false;
         let mut export = false;
         egui::Window::new("MIDI Controller")
             .open(&mut open)
             .default_width(620.0)
             .vscroll(true)
             .show(ctx, |ui| {
-                ui.label("UC-33e / MIDI CC control - Windows");
+                ui.label("Controller and keyboard input - Windows");
                 ui.horizontal(|ui| {
                     import = ui.button("Import routing...").clicked();
+                    recover = ui.button("Recover V1 assignments").on_hover_text(
+                        "Copy available assignments from your V1 preferences. Current V2 assignments take priority."
+                    ).clicked();
                     export = ui.button("Export routing...").clicked();
                 });
                 ui.small(
@@ -867,6 +902,9 @@ impl App {
                     self.midi.outputs = backend::output_ports().unwrap_or_default();
                 }
                 let config = &mut self.settings.midi;
+                let (keyboard_changed, panic) = config.keyboard.controls(ui);
+                changed |= keyboard_changed;
+                release |= panic;
                 ui.separator();
                 ui.strong("MIDI CLOCK / SYNC");
                 ui.horizontal(|ui| {
@@ -1149,6 +1187,7 @@ impl App {
             self.midi.router.reset();
             changed = true;
         }
+        if release || reconnect { self.release_keyboard(); }
         if reconnect {
             self.midi.connect(&self.settings.midi);
         }
@@ -1159,6 +1198,22 @@ impl App {
         if import {
             self.import_midi_routing();
             ctx.request_repaint();
+        }
+        if recover {
+            self.midi.notice = None;
+            let result = crate::settings::v1_file()
+                .ok_or_else(|| "V1 preferences folder unavailable".to_owned())
+                .and_then(|path| preset::recover_v1(&path, &mut self.settings.midi));
+            match result {
+                Ok(count) => {
+                    self.release_keyboard();
+                    self.midi.router.reset();
+                    self.midi.connect(&self.settings.midi);
+                    self.midi.notice = Some(format!("Recovered {count} V1 assignments."));
+                    self.save_midi();
+                }
+                Err(e) => self.midi.error = Some(e),
+            }
         }
         if export {
             self.export_midi_routing();

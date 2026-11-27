@@ -2,7 +2,7 @@
 
 use super::{ACID, App, DIM, INK, NOTES, Rack, Ui, button, egui, mix_knob};
 use orb_engine::studio::acid_presets::PRESETS;
-use orb_engine::studio::acid_synth::{Slot, Step};
+use orb_engine::studio::acid_synth::{PhraseLength, Slot};
 
 const RATES: [(u16, &str); 5] = [
     (48, "1/16"), (96, "1/8"), (192, "1/4"), (384, "1/2"), (768, "1 bar"),
@@ -11,7 +11,7 @@ const MACROS: [(&str, &str); 4] = [
     ("timbre", "TIMBRE"), ("movement", "MOVEMENT"), ("width", "WIDTH"), ("space", "SPACE"),
 ];
 
-fn pitch_name(note: u8) -> String {
+pub(super) fn pitch_name(note: u8) -> String {
     if note == 0 {
         return "Rest".into();
     }
@@ -19,7 +19,7 @@ fn pitch_name(note: u8) -> String {
 }
 
 /// Accept the pitch names shown by the editor, as well as a numeric MIDI pitch.
-fn parse_pitch(text: &str) -> Option<f64> {
+pub(super) fn parse_pitch(text: &str) -> Option<f64> {
     let text = text.trim();
     if text.eq_ignore_ascii_case("rest") {
         return Some(0.0);
@@ -49,7 +49,7 @@ fn step_id(row: usize) -> egui::Id {
     egui::Id::unique(("acid-selected-step", row))
 }
 
-fn apply_preset(slot: &mut Slot, index: usize) {
+pub(super) fn apply_preset(slot: &mut Slot, index: usize) {
     slot.preset = index as u8;
     slot.patch = PRESETS[index].1;
 }
@@ -78,14 +78,27 @@ impl App {
                     });
             },
         );
+        if button(ui, rack, rack.rect(101.0, y + 36.0, 104.0, 22.0),
+            (row, "acid-keys-only"),
+            if slot.sequence_enabled { "SEQUENCE + KEYS" } else { "KEYS ONLY" },
+            !slot.sequence_enabled,
+        ).on_hover_text("Switch between sequencer + MIDI keyboard and MIDI keyboard only.").clicked() {
+            slot.sequence_enabled = !slot.sequence_enabled;
+            changed = true;
+        }
+        let bars = matches!(slot.length, PhraseLength::Bars(_));
         rack.text(ui, 30.0, y + 105.0, 9.0, "STEP RATE", DIM);
-        for (n, &(ticks, label)) in RATES.iter().enumerate() {
-            if button(
-                ui, rack, rack.rect(28.0 + n as f32 * 36.0, y + 123.0, 34.0, 21.0),
-                (row, "acid-rate", ticks), label, slot.step_ticks == ticks,
-            ).clicked() && slot.step_ticks != ticks {
-                slot.step_ticks = ticks;
-                changed = true;
+        if bars {
+            rack.text(ui, 30.0, y + 133.0, 10.0, "1/16 per step", INK);
+        } else {
+            for (n, &(ticks, label)) in RATES.iter().enumerate() {
+                if button(
+                    ui, rack, rack.rect(28.0 + n as f32 * 36.0, y + 123.0, 34.0, 21.0),
+                    (row, "acid-rate", ticks), label, slot.step_ticks == ticks,
+                ).clicked() && slot.step_ticks != ticks {
+                    slot.step_ticks = ticks;
+                    changed = true;
+                }
             }
         }
         for (i, &(key, label)) in MACROS.iter().enumerate() {
@@ -107,114 +120,94 @@ impl App {
             self.panel.focus = row;
             ui.ctx().data_mut(|d| d.insert_temp(editor_id, Some(row)));
         }
+        let chord_id = egui::Id::unique("acid-chord-editor");
+        let page_id = egui::Id::unique(("acid-page", row));
+        let mut page = ui.ctx().data(|d| d.get_temp::<usize>(page_id)).unwrap_or(0);
+        let count = match slot.length {
+            PhraseLength::Steps(n) => format!("{n} steps"),
+            PhraseLength::Bars(n) => format!("{n} bars"),
+        };
+        ui.scope_builder(
+            egui::UiBuilder::new().id_salt(("acid-length", row))
+                .max_rect(rack.rect(405.0, y + 8.0, 85.0, 18.0)),
+            |ui| {
+                egui::ComboBox::from_id_salt("length").width(ui.available_width()).selected_text(count).show_ui(ui, |ui| {
+                    for n in [16, 32, 64, 128] {
+                        for (length, unit) in [(PhraseLength::Steps(n), "steps"), (PhraseLength::Bars(n), "bars")] {
+                            if ui.selectable_value(&mut slot.length, length, format!("{n} {unit}")).changed() {
+                                changed = true;
+                            }
+                        }
+                    }
+                });
+            },
+        );
+        let pages = slot.step_count().div_ceil(16);
+        page = page.min(pages - 1);
+        if button(ui, rack, rack.rect(512.0, y + 9.0, 20.0, 19.0), (row, "page-prev"), "<", false).clicked() {
+            page = page.saturating_sub(1);
+        }
+        button(ui, rack, rack.rect(536.0, y + 9.0, 60.0, 19.0), (row, "page-indicator"),
+            &format!("{}/{}", page + 1, pages), false).on_hover_text("Right-click to jump to a page")
+            .context_menu(|ui| {
+                let mut page_number = page + 1;
+                if ui.add(egui::DragValue::new(&mut page_number).range(1..=pages).prefix("Page ")).changed() {
+                    page = page_number - 1;
+                }
+            });
+        if button(ui, rack, rack.rect(600.0, y + 9.0, 20.0, 19.0), (row, "page-next"), ">", false).clicked() {
+            page = (page + 1).min(pages - 1);
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(page_id, page));
+        if button(ui, rack, rack.rect(630.0, y + 9.0, 116.0, 19.0),
+            (row, "acid-chord"), "CHORD LAB", false).clicked() {
+            let selected = ui.ctx().data(|d| d.get_temp::<usize>(step_id(row))).unwrap_or(0);
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(step_id(row), page * 16 + selected % 16);
+                d.insert_temp(chord_id, Some(row));
+            });
+            self.panel.focus = row;
+        }
         let cursor = self.panel.transport.position.max(0) as usize
-            / usize::from(slot.step_ticks.max(1)) % slot.steps.len();
-        for (index, step) in slot.steps.iter().enumerate() {
+            / usize::from(slot.ticks_per_step().max(1)) % slot.step_count();
+        for column in 0..16 {
+            let index = page * 16 + column;
+            let step = slot.step(index);
             let root = step.notes.iter().copied().find(|&n| n != 0);
             let label = root.map(pitch_name).unwrap_or_else(|| "–".into());
             let response = button(
-                ui, rack, rack.rect(224.0 + index as f32 * 38.0, y + 126.0, 34.0, 27.0),
+                ui, rack, rack.rect(224.0 + column as f32 * 38.0, y + 126.0, 34.0, 27.0),
                 (row, "acid-step", index), &label, root.is_some(),
-            ).on_hover_text(format!("Step {} · Click to edit notes and duration", index + 1));
+            ).on_hover_text(format!("Step {}: click to edit notes and duration", index + 1));
             if response.clicked() {
                 self.panel.focus = row;
                 ui.ctx().data_mut(|d| {
                     d.insert_temp(step_id(row), index);
-                    d.insert_temp(editor_id, Some(row));
+                    d.insert_temp(chord_id, Some(row));
                 });
             }
-            if self.panel.transport.playing && cursor == index {
+            if slot.sequence_enabled && self.panel.transport.playing && cursor == index {
                 ui.painter().rect_filled(
-                    rack.rect(225.0 + index as f32 * 38.0, y + 120.0, 32.0, 2.0), 0.0, ACID,
+                    rack.rect(225.0 + column as f32 * 38.0, y + 120.0, 32.0, 2.0), 0.0, ACID,
                 );
             }
         }
-        rack.text(ui, 231.0, y + 19.0, 8.0, "POLYPHONIC WAVETABLE", INK);
+        let linked = self.generator.options.link_tb;
+        if button(ui, rack, rack.rect(228.0, y + 9.0, 76.0, 19.0),
+            (row, "acid-link"), "LINK A/B", linked)
+            .on_hover_text("Generate harmonically linked synth and TB patterns.").clicked() {
+            self.generator.options.link_tb = !linked;
+        }
+        if button(ui, rack, rack.rect(313.0, y + 9.0, 72.0, 19.0),
+            (row, "acid-rnd"), "RND", false).on_hover_text("Generate a new chord sequence").clicked() {
+            self.random_pattern(row);
+        }
         if changed {
             self.studio.changed();
             self.doc.modified = true;
         }
     }
 
-    pub(super) fn acid_editor(&mut self, ui: &mut Ui, row: usize, id: egui::Id) {
-        let slot = &mut self.studio.settings.synth_slots[row];
-        let mut changed = false;
-        let mut open = true;
-        let title = format!("AcidSynth {} / Editor", ["A", "B"][row]);
-        egui::Window::new(title).open(&mut open).resizable(true).vscroll(true)
-            .default_width(490.0).show(ui.ctx(), |ui| {
-                ui.heading("Sound");
-                let patch = &mut slot.patch;
-                egui::Grid::new(("acid-patch", row)).num_columns(2).show(ui, |ui| {
-                    for (label, param) in [
-                        ("Oscillator A / Table position", &mut patch.wave_a),
-                        ("Oscillator B / Table position", &mut patch.wave_b),
-                        ("Oscillator balance", &mut patch.mix),
-                        ("Detune", &mut patch.detune),
-                        ("Filter cutoff", &mut patch.cutoff),
-                        ("Filter resonance", &mut patch.resonance),
-                        ("Attack", &mut patch.attack),
-                        ("Release", &mut patch.release),
-                        ("LFO rate", &mut patch.lfo_rate),
-                        ("LFO depth", &mut patch.lfo_depth),
-                    ] {
-                        ui.label(label);
-                        changed |= ui.add(egui::Slider::new(param, 0.0..=1.0)).changed();
-                        ui.end_row();
-                    }
-                });
-                ui.separator();
-                let mut index = ui.ctx().data(|d| d.get_temp::<usize>(step_id(row))).unwrap_or(0).min(15);
-                ui.horizontal(|ui| {
-                    ui.heading("Chord");
-                    if ui.button("‹").clicked() { index = (index + 15) % 16; }
-                    ui.label(format!("Step {:02}", index + 1));
-                    if ui.button("›").clicked() { index = (index + 1) % 16; }
-                });
-                ui.ctx().data_mut(|d| d.insert_temp(step_id(row), index));
-                changed |= edit_chord(ui, &mut slot.steps[index]);
-            });
-        if changed {
-            self.studio.changed();
-            self.doc.modified = true;
-        }
-        if !open {
-            ui.ctx().data_mut(|d| d.insert_temp(id, None::<usize>));
-        }
-    }
-}
-
-fn edit_chord(ui: &mut Ui, step: &mut Step) -> bool {
-    let mut changed = false;
-    ui.horizontal_wrapped(|ui| {
-        for (label, offsets) in [
-            ("Minor", &[0, 3, 7][..]), ("Major", &[0, 4, 7][..]),
-            ("Min 7", &[0, 3, 7, 10][..]), ("Sus 2", &[0, 2, 7][..]),
-        ] {
-            if ui.button(label).clicked() {
-                let root = step.notes.iter().copied().find(|&n| n != 0).unwrap_or(48)
-                    .min(127 - offsets[offsets.len() - 1]);
-                step.notes = [0; 4];
-                for (note, &offset) in step.notes.iter_mut().zip(offsets) {
-                    *note = root + offset;
-                }
-                changed = true;
-            }
-        }
-        if ui.button("Clear").clicked() {
-            step.notes = [0; 4];
-            changed = true;
-        }
-    });
-    ui.horizontal_wrapped(|ui| {
-        for note in &mut step.notes {
-            changed |= ui.add(egui::DragValue::new(note).range(0..=127).speed(0.15)
-                .custom_formatter(|v, _| pitch_name(v.round() as u8)).custom_parser(parse_pitch))
-                .on_hover_text("Drag to transpose, or click and type a note such as D3 or F#4. Type 0 for a rest.").changed();
-        }
-    });
-    changed |= ui.add(egui::Slider::new(&mut step.gate_steps, 1..=16).text("Duration in steps")).changed();
-    changed
 }
 
 #[cfg(test)]
@@ -253,6 +246,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn late_page_click_opens_chord_lab_on_the_absolute_step() {
+        let ctx = Context::default();
+        let mut app = App::new(Panel::new(), None);
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(WIDTH, HEIGHT));
+        let rack = Rack::fit(canvas);
+        let y = ROWS[0].0;
+        let slot = &mut app.studio.settings.synth_slots[0];
+        slot.enabled = true;
+        slot.length = PhraseLength::Bars(128);
+        ctx.data_mut(|data| data.insert_temp(egui::Id::unique(("acid-page", 0usize)), 127usize));
+        click(&ctx, &mut app, canvas, rack.rect(224.0 + 15.0 * 38.0, y + 126.0, 34.0, 27.0).center());
+        ctx.data(|data| {
+            assert_eq!(data.get_temp::<usize>(step_id(0)), Some(2047));
+            assert_eq!(data.get_temp::<Option<usize>>(egui::Id::unique("acid-chord-editor")), Some(Some(0)));
+            assert_eq!(data.get_temp::<Option<usize>>(egui::Id::unique("graphite-edit")).flatten(), None);
+        });
+    }
     #[test]
     fn rack_switch_preserves_each_slots_sequence_and_the_tb_pattern() {
         let ctx = Context::default();

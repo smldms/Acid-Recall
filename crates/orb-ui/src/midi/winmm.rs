@@ -103,7 +103,8 @@ unsafe extern "system" fn receive(
     if let Some(clock) = &callback.clock {
         clock.receive(word as u32);
     }
-    if super::Cc::decode(word as u32).is_some() && callback.sender.try_send(word as u32).is_err() {
+    let status = word as u8 >> 4;
+    if matches!(status, 8 | 9 | 11) && callback.sender.try_send(word as u32).is_err() {
         callback.dropped.fetch_add(1, Ordering::Relaxed);
     }
 }

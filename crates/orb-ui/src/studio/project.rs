@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 
 const MAGIC: &[u8; 8] = b"ORB338S2";
 const SYNTH_MAGIC: &[u8; 8] = b"ORB338S3";
+const EXTENDED_SYNTH_MAGIC: &[u8; 8] = b"ORB338S4";
 const MAX_BYTES: usize = 256 * 1024 * 1024;
+const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
 
 /// New projects use .recall; the original Studio extension remains fully supported.
 pub fn is_project_path(path: &Path) -> bool {
@@ -90,8 +92,11 @@ impl Project {
             .synth_slots
             .iter()
             .any(|slot| *slot != Default::default());
-        let mut out = if has_synth_data { SYNTH_MAGIC } else { MAGIC }.to_vec();
+        let mut out = if has_synth_data { EXTENDED_SYNTH_MAGIC } else { MAGIC }.to_vec();
         let metadata = toml::to_string(&self.metadata).map_err(|e| e.to_string())?;
+        if metadata.len() > MAX_METADATA_BYTES {
+            return Err("Studio project metadata exceeds its size limit".into());
+        }
         put(&mut out, metadata.as_bytes())?;
         put(&mut out, &self.song)?;
         for wave in self
@@ -113,13 +118,14 @@ impl Project {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() > MAX_BYTES || !(bytes.starts_with(MAGIC) || bytes.starts_with(SYNTH_MAGIC))
+        if bytes.len() > MAX_BYTES || ![MAGIC, SYNTH_MAGIC, EXTENDED_SYNTH_MAGIC]
+            .iter().any(|magic| bytes.starts_with(&magic[..]))
         {
-            return Err("Not a supported Studio project (ORB338S2 or ORB338S3)".into());
+            return Err("Not a supported Studio project (ORB338S2, ORB338S3 or ORB338S4)".into());
         }
         let mut bytes = &bytes[8..];
         let mut metadata: Metadata = toml::from_str(
-            std::str::from_utf8(take(&mut bytes, 1024 * 1024)?).map_err(|e| e.to_string())?,
+            std::str::from_utf8(take(&mut bytes, MAX_METADATA_BYTES)?).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
         if metadata
@@ -214,7 +220,8 @@ mod tests {
         let [bass, pad] = &runtime.settings.synth_slots;
         assert!(!bass.enabled && pad.enabled);
         assert_eq!(pad.steps[0].notes, [50, 57, 65, 76]);
-        assert_eq!(u16::from(pad.steps[0].gate_steps) * pad.step_ticks, 4 * 768);
+        assert_eq!(pad.steps[0].gate_steps * pad.step_ticks, 4 * 768);
+        assert_eq!(pad.step_count(), 16);
     }
 
     #[test]

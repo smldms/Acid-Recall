@@ -7,6 +7,8 @@ use crate::layout;
 use crate::midi::MidiMenu;
 
 mod acid_synth;
+mod chord_lab;
+mod sound_editor;
 
 pub const WIDTH: f32 = 1760.0;
 pub const HEIGHT: f32 = 1300.0;
@@ -535,9 +537,10 @@ impl App {
                         rack,
                         rack.rect(617.0, y + 9.0, 62.0, 19.0),
                         (row, "link"),
-                        "LINK TB",
+                        "LINK A/B",
                         self.generator.options.link_tb,
                     )
+                    .on_hover_text("Generate harmonically linked patterns across the two instrument slots.")
                     .clicked()
                     {
                         self.generator.options.link_tb = !self.generator.options.link_tb;
@@ -546,6 +549,15 @@ impl App {
             }
         });
         self.rack_advanced(ui);
+        let chord_id = egui::Id::unique("acid-chord-editor");
+        let chord_row = ui.ctx().data(|d| d.get_temp::<Option<usize>>(chord_id)).flatten();
+        if let Some(row) = chord_row {
+            if row < 2 && self.studio.settings.synth_slots[row].enabled {
+                self.acid_chord_editor(ui, row, chord_id);
+            } else {
+                ui.ctx().data_mut(|d| d.insert_temp(chord_id, None::<usize>));
+            }
+        }
         (
             rack.rect(14.0, 962.0, 1030.0, 320.0),
             rack.rect(1058.0, 84.0, 208.0, 1202.0),

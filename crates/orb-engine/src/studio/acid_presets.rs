@@ -1,5 +1,5 @@
 //! Factory patches for AcidSynth. Patch values use the same normalized range as the editor.
-use super::acid_synth::Patch;
+use super::acid_synth::{ModRoute, Patch};
 
 /// Stable display order for the patch browser.
 pub const PRESETS: &[(&str, Patch)] = &[
@@ -16,6 +16,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.19,
             lfo_rate: 0.19,
             lfo_depth: 0.22,
+            ..Patch::INIT
         },
     ),
     (
@@ -31,6 +32,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.26,
             lfo_rate: 0.14,
             lfo_depth: 0.37,
+            ..Patch::INIT
         },
     ),
     (
@@ -46,6 +48,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.32,
             lfo_rate: 0.22,
             lfo_depth: 0.19,
+            ..Patch::INIT
         },
     ),
     (
@@ -61,6 +64,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.17,
             lfo_rate: 0.28,
             lfo_depth: 0.24,
+            ..Patch::INIT
         },
     ),
     (
@@ -76,6 +80,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.35,
             lfo_rate: 0.08,
             lfo_depth: 0.51,
+            ..Patch::INIT
         },
     ),
     (
@@ -91,6 +96,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.46,
             lfo_rate: 0.19,
             lfo_depth: 0.13,
+            ..Patch::INIT
         },
     ),
     (
@@ -106,6 +112,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.34,
             lfo_rate: 0.30,
             lfo_depth: 0.18,
+            ..Patch::INIT
         },
     ),
     (
@@ -121,6 +128,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.56,
             lfo_rate: 0.11,
             lfo_depth: 0.29,
+            ..Patch::INIT
         },
     ),
     (
@@ -136,6 +144,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.49,
             lfo_rate: 0.65,
             lfo_depth: 0.42,
+            ..Patch::INIT
         },
     ),
     (
@@ -151,6 +160,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.39,
             lfo_rate: 0.09,
             lfo_depth: 0.46,
+            ..Patch::INIT
         },
     ),
     (
@@ -166,6 +176,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.24,
             lfo_rate: 0.06,
             lfo_depth: 0.50,
+            ..Patch::INIT
         },
     ),
     (
@@ -181,6 +192,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.43,
             lfo_rate: 0.17,
             lfo_depth: 0.34,
+            ..Patch::INIT
         },
     ),
     (
@@ -196,6 +208,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.57,
             lfo_rate: 0.47,
             lfo_depth: 0.67,
+            ..Patch::INIT
         },
     ),
     (
@@ -211,6 +224,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.36,
             lfo_rate: 0.29,
             lfo_depth: 0.15,
+            ..Patch::INIT
         },
     ),
     (
@@ -226,6 +240,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.54,
             lfo_rate: 0.56,
             lfo_depth: 0.21,
+            ..Patch::INIT
         },
     ),
     (
@@ -241,6 +256,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.25,
             lfo_rate: 0.33,
             lfo_depth: 0.27,
+            ..Patch::INIT
         },
     ),
     (
@@ -256,6 +272,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.15,
             lfo_rate: 0.20,
             lfo_depth: 0.10,
+            ..Patch::INIT
         },
     ),
     (
@@ -271,6 +288,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.30,
             lfo_rate: 0.39,
             lfo_depth: 0.24,
+            ..Patch::INIT
         },
     ),
     (
@@ -286,6 +304,7 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.29,
             lfo_rate: 0.13,
             lfo_depth: 0.07,
+            ..Patch::INIT
         },
     ),
     (
@@ -301,6 +320,34 @@ pub const PRESETS: &[(&str, Patch)] = &[
             resonance: 0.50,
             lfo_rate: 0.46,
             lfo_depth: 0.34,
+            ..Patch::INIT
         },
     ),
+    ("Pad / Ion Cathedral", Patch {
+        wave_a: 0.63, wave_b: 0.91, osc_mode: 2, transpose_b: 7, mix: 0.32,
+        attack: 0.51, decay: 0.75, sustain: 0.76, release: 0.72,
+        cutoff: 0.56, filter_env: 0.38, chorus: 0.77,
+        routes: [
+            ModRoute { source: 1, dest: 1, amount: 0.16 },
+            ModRoute { source: 2, dest: 3, amount: -0.14 },
+            ModRoute::OFF, ModRoute::OFF,
+        ],
+        ..Patch::INIT
+    }),
+    ("Stab / Copper Contacts", Patch {
+        wave_a: 0.69, wave_b: 0.41, osc_mode: 1, transpose_b: 12, mix: 0.57,
+        attack: 0.01, decay: 0.32, sustain: 0.25, release: 0.24,
+        cutoff: 0.32, filter_env: 0.82, resonance: 0.58, drive: 0.27, ..Patch::INIT
+    }),
+    ("Drone / Polar Current", Patch {
+        wave_a: 0.64, wave_b: 0.89, detune: 0.47, mix: 0.54, transpose_b: -12,
+        attack: 0.56, release: 0.77, cutoff: 0.49, filter_mode: 3,
+        lfo_target: 1, lfo_shape: 1, lfo_rate: 0.11, lfo_depth: 0.88, chorus: 0.42,
+        ..Patch::INIT
+    }),
+    ("Bass / Relay Shunt", Patch {
+        wave_a: 0.64, wave_b: 0.99, sub: 0.43, mix: 0.2, drive: 0.5,
+        attack: 0.01, decay: 0.26, sustain: 0.42, release: 0.19,
+        cutoff: 0.23, filter_env: 0.86, resonance: 0.34, ..Patch::INIT
+    }),
 ];

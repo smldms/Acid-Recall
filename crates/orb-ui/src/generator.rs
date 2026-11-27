@@ -1,6 +1,7 @@
 //! Musical pattern generation. Only pattern data changes; synthesis stays in orb-engine.
 //! Seeded generators are deterministic so musical constraints can be checked without audio I/O.
 
+mod acid;
 mod rhythms;
 mod ui;
 
@@ -411,6 +412,7 @@ struct Change {
 struct Undo {
     changes: Vec<Change>,
     tuning: Option<([i32; 2], [i32; 2])>,
+    pads: Vec<acid::PadChange>,
 }
 
 pub struct Generator {

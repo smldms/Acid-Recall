@@ -1,6 +1,7 @@
 //! Optional Studio instruments and convolution send. Legacy frames have no Studio instance.
 
 pub mod acid_synth;
+pub mod acid_live;
 pub mod acid_presets;
 pub mod audio_file;
 mod bus;
@@ -165,6 +166,11 @@ impl Studio {
 
     pub fn replace_settings(&mut self, mut settings: Box<Settings>) -> Box<Settings> {
         settings.sanitize();
+        for (index, next) in settings.synth_slots.iter().enumerate() {
+            if self.settings.synth_slots[index].enabled && !next.enabled {
+                self.synths[index].live_event(acid_live::Event::Panic, 0.0, 0.0);
+            }
+        }
         std::mem::replace(&mut self.settings, settings)
     }
 
@@ -188,6 +194,14 @@ impl Studio {
             self.fade = 4410;
         }
         old
+    }
+
+    pub fn live_note(&mut self, slot: usize, event: acid_live::Event, tick: f64, advance: f64) {
+        if let Some(instrument) = self.synths.get_mut(slot)
+            && self.settings.synth_slots[slot].enabled
+        {
+            instrument.live_event(event, tick, advance);
+        }
     }
 
     pub(crate) fn synth_channel(&mut self, c: usize, bus: &mut crate::frame::Block, tick: f64, advance: f64, play: bool) {

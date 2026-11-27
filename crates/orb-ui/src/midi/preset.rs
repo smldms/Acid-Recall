@@ -13,6 +13,43 @@ const VERSION: u32 = 1;
 const MAX_BYTES: usize = 1024 * 1024;
 const MAX_BINDINGS: usize = 512;
 
+/// Read the old application's settings once, only when the musician requests recovery.
+pub(super) fn recover_v1(path: &Path, current: &mut Config) -> Result<usize, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+    let mut table: toml::Table = toml::from_str(&text).map_err(|e| format!("Invalid V1 settings: {e}"))?;
+    let mut old: Config = table.remove("midi").ok_or("No MIDI settings found in V1")?
+        .try_into().map_err(|e| format!("Invalid V1 MIDI settings: {e}"))?;
+    old.sanitize();
+    let previous_count = current.bindings.len();
+    if current.port.is_none() && current.additional_inputs.is_empty() && previous_count == 0 {
+        current.port.clone_from(&old.port);
+        current.additional_inputs.clone_from(&old.additional_inputs);
+        current.minimum_cc = old.minimum_cc;
+        current.pickup = old.pickup;
+        current.enabled |= old.enabled;
+    }
+    let old_ports = old.inputs();
+    for original in &old.bindings {
+        let mut binding = original.clone();
+        if let Some((_, name)) = old_ports.iter().find(|(i, _)| *i == original.input) {
+            let Some((index, _)) = current.inputs().into_iter().find(|(_, n)| n == name) else {
+                continue;
+            };
+            binding.input = index;
+        }
+        if current.bindings.iter().any(|b| b.target == binding.target ||
+            (b.input, b.channel, b.controller) == (binding.input, binding.channel, binding.controller)) {
+            continue;
+        }
+        if let Some(range) = old.ranges.get(&binding.target) {
+            current.ranges.insert(binding.target.clone(), *range);
+        }
+        current.assign(binding);
+    }
+    Ok(current.bindings.len() - previous_count)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutingPreset {
     format: String,
@@ -21,6 +58,37 @@ pub struct RoutingPreset {
     bindings: Vec<Binding>,
     #[serde(default)]
     ranges: BTreeMap<String, ValueRange>,
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn v1_recovery_preserves_relearned_controls_and_remaps_named_ports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ui.toml");
+        let settings = r#"[midi]
+port = "UC-33e"
+bindings = [
+  { channel = 1, controller = 10, target = "studio.width" },
+  { channel = 1, controller = 11, target = "studio.return" }
+]
+[midi.ranges."studio.return"]
+max = 90
+"#;
+        std::fs::write(&path, settings).unwrap();
+        let mut current = Config { port: Some("Keyboard".into()), ..Config::default() };
+        current.additional_inputs.push(super::super::InputSettings {
+            port: Some("UC-33e".into()), ..Default::default()
+        });
+        current.assign(Binding { input: 1, channel: 1, controller: 10, target: "studio.low_cut".into() });
+        assert_eq!(recover_v1(&path, &mut current).unwrap(), 1);
+        assert_eq!(recover_v1(&path, &mut current).unwrap(), 0);
+        assert_eq!(current.bindings[1].input, 1);
+        assert_eq!(current.ranges["studio.return"].max, 90);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), settings);
+    }
 }
 
 impl RoutingPreset {

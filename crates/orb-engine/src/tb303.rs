@@ -52,6 +52,11 @@ const TUNE_TABLE: [i16; 32] = [
     8, 9, 10, 11, 12, 12,
 ];
 
+/// Transposition of the native tuning control, including its center dead band.
+pub fn tune_semitones(value: u8) -> i16 {
+    TUNE_TABLE[usize::from(value.min(127) >> 2)]
+}
+
 // Note-on (0x10023CD4).
 /// `dbl_10153B28`: 1/12700.
 const ACC_RESO_SCALE: f64 = f64::from_bits(0x3F14_A429_9AE3_DC33);
@@ -359,7 +364,7 @@ impl Tb303 {
         }
         // 0x10023E61: ((tune + (int16)(note + 12*up - 12*down)) * 64 + 3072) * 16
         let semis = (note as i32 + 12 * up as i32 - 12 * down as i32) as i16 as i32;
-        let tune = TUNE_TABLE[(self.live[TUNE] >> 2) as usize] as i32;
+        let tune = i32::from(tune_semitones(self.live[TUNE]));
         self.pitch_target = (((tune << 6) + (semis << 6) + 0xC00) << 4) as u32;
         if !self.slide {
             self.pitch = self.pitch_target;

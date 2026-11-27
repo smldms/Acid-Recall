@@ -125,6 +125,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, Exit> {
                     Some("warp") => "warp".into(),
                     Some("audio") => "audio".into(),
                     Some("trial") => "trial".into(),
+                    Some("synth") => "synth".into(),
+                    Some("chord") => "chord".into(),
                     _ => return Err(Exit::Bad),
                 });
             }
@@ -373,6 +375,11 @@ fn main() -> eframe::Result {
                 }
             });
             if let Some(view) = studio_view {
+                if matches!(view.as_str(), "synth" | "chord") {
+                    app.studio.settings.synth_slots[1].enabled = true;
+                    let editor = if view == "synth" { "graphite-edit" } else { "acid-chord-editor" };
+                    cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::unique(editor), Some(1_usize)));
+                }
                 if view == "trial" && demo {
                     for (machine, length) in [(0, 32), (1, 64)] {
                         let pattern = app.panel.rows[machine + 2].pattern as usize;

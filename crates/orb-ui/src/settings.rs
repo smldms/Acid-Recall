@@ -105,7 +105,15 @@ pub fn default_file() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("ORB_UI_CONFIG").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
     }
-    let base = if cfg!(windows) {
+    platform_config_dir().map(|b| b.join("ACID-RECALL-V2").join("ui.toml"))
+}
+
+pub(crate) fn v1_file() -> Option<PathBuf> {
+    platform_config_dir().map(|b| b.join("OpenRB-338").join("ui.toml"))
+}
+
+fn platform_config_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else if let Some(x) = std::env::var_os("XDG_CONFIG_HOME").filter(|x| !x.is_empty()) {
         Some(PathBuf::from(x))
@@ -113,8 +121,7 @@ pub fn default_file() -> Option<PathBuf> {
         home().map(|h| h.join("Library/Application Support"))
     } else {
         home().map(|h| h.join(".config"))
-    };
-    base.map(|b| b.join("ACID-RECALL-V2").join("ui.toml"))
+    }
 }
 
 /// What the file holds, in the file's order.

@@ -161,6 +161,9 @@ fn save_and_open_restore_embedded_sample_last_step_and_mix_settings() {
         synth.enabled = true;
         synth.steps[0].notes = [48, 55, 62, 67];
         synth.steps[0].gate_steps = 4;
+        synth.length = orb_engine::studio::acid_synth::PhraseLength::Bars(128);
+        synth.step_mut(2047).notes = [52, 59, 64, 71];
+        synth.step_mut(512).gate_steps = 512;
         let expected_slots = app.studio.settings.synth_slots.clone();
         app.studio.settings.return_gain = 0.73;
         app.studio.settings.sampler_bus.gain = 0.42;
@@ -186,7 +189,7 @@ fn save_and_open_restore_embedded_sample_last_step_and_mix_settings() {
         finish(&mut app, &mut audio, &ctx);
         assert!(app.studio.notice.is_none(), "{:?}", app.studio.notice);
         assert!(path.is_file());
-        assert!(std::fs::read(&path).unwrap().starts_with(b"ORB338S3"));
+        assert!(std::fs::read(&path).unwrap().starts_with(b"ORB338S4"));
         assert!(!app.doc.modified);
         app.studio.settings.lanes[7].steps[1023] = 0;
         app.studio.settings.synth_slots = Default::default();

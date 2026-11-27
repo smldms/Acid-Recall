@@ -2,9 +2,9 @@
 //! name (crate `orb-ui`) because the macOS Dock and Activity Monitor show the executable's name.
 //!
 //! ```text
-//! OpenRB-338 [SONG]
+//! ACID-RECALL [--graphics dx12|vulkan|auto] [SONG]
 //! ```
-//! `--help` shows only this. The options below are for developers, tests and screenshots
+//! `--help` shows these public options. The options below are for developers and screenshots
 //! (task-137): hidden from `--help` and the usage text, but they all work (docs/building.md,
 //! "OpenRB-338 developer options"):
 //!
@@ -52,13 +52,17 @@ use orb_ui::model::Panel;
 use orb_ui::session;
 use orb_ui::settings::Settings;
 
-/// The visible help: only the song. The developer options are hidden (task-137).
-const USAGE: &str = "usage: ACID-RECALL [SONG]\n\
-                     SONG is a ReBirth song (.rbs) or an Acid Recall project (.recall; legacy .orb338)";
+mod graphics;
+
+/// Public launch options; screenshot and developer options remain hidden.
+const USAGE: &str = "usage: ACID-RECALL [--graphics dx12|vulkan|auto] [SONG]\n\
+                     SONG is a ReBirth song (.rbs) or an Acid Recall project (.recall; legacy .orb338)\n\
+                     Windows defaults to DX12. --graphics overrides WGPU_BACKEND.";
 
 /// The command line, parsed.
 #[derive(Debug, PartialEq)]
 struct Args {
+    graphics: Option<graphics::Backend>,
     studio_view: Option<String>,
     demo: bool,
     about: bool,
@@ -97,6 +101,7 @@ enum Exit {
 /// Parses the arguments after the program name. `-psn_...` (Finder on old macOS) is ignored.
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, Exit> {
     let mut r = Args {
+        graphics: None,
         studio_view: None,
         demo: false,
         about: false,
@@ -118,6 +123,14 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, Exit> {
             "--about" => r.about = true,
             "--info" => r.info = true,
             "--play" => r.play = true,
+            "--graphics" => {
+                r.graphics = Some(
+                    args.next()
+                        .as_deref()
+                        .and_then(graphics::Backend::parse)
+                        .ok_or(Exit::Bad)?,
+                );
+            }
             "--studio-view" => {
                 r.studio_view = Some(match args.next().as_deref() {
                     Some("sampler") => "sampler".into(),
@@ -221,6 +234,7 @@ fn main() -> eframe::Result {
         env!("ORB_UI_VERSION")
     ));
     let Args {
+        graphics,
         studio_view,
         demo,
         about,
@@ -293,6 +307,7 @@ fn main() -> eframe::Result {
         .with_maximized(!sized);
     let options = eframe::NativeOptions {
         viewport,
+        wgpu_options: graphics::configuration(graphics),
         ..Default::default()
     };
     eframe::run_native(
@@ -486,8 +501,9 @@ mod tests {
     }
 
     #[test]
-    fn the_usage_shows_only_the_song() {
+    fn the_usage_shows_the_song_and_graphics_choice() {
         assert!(USAGE.contains("[SONG]"));
+        assert!(USAGE.contains("--graphics dx12|vulkan|auto"));
         for hidden in [
             "--demo",
             "--size",
@@ -499,6 +515,24 @@ mod tests {
             "--play",
         ] {
             assert!(!USAGE.contains(hidden), "{hidden}");
+        }
+    }
+
+    #[test]
+    fn graphics_selection_parses_and_rejects_missing_or_unknown_values() {
+        assert_eq!(parse(&[]).unwrap().graphics, None);
+        for (value, expected) in [
+            ("dx12", graphics::Backend::Dx12),
+            ("DX12", graphics::Backend::Dx12),
+            ("vulkan", graphics::Backend::Vulkan),
+            ("auto", graphics::Backend::Auto),
+        ] {
+            let args = parse(&["--graphics", value, "my song.recall"]).unwrap();
+            assert_eq!(args.graphics, Some(expected));
+            assert_eq!(args.song, Some("my song.recall".into()));
+        }
+        for bad in [&["--graphics"][..], &["--graphics", "unknown"]] {
+            assert_eq!(parse(bad), Err(Exit::Bad));
         }
     }
 }

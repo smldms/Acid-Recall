@@ -2,7 +2,7 @@ name: ACID RECALL Windows
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/windows-dx12-1.1]
   workflow_dispatch:
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Tests
-        run: cargo test --locked -p orb-ui --lib --test sidechain --test theme --test arpeggiator --test generator --test midi_preset --test midi --test midi_caps --test midi_clock --test settings --test wired --test repaint --test menu
+        run: cargo test --locked -p orb-ui --lib --bins --test cli_args --test sidechain --test theme --test arpeggiator --test generator --test midi_preset --test midi --test midi_caps --test midi_clock --test settings --test wired --test repaint --test menu
       - name: Engine and sidechain regression tests
         run: cargo test --locked -p orb-engine
       - name: Check default skin and render preview
@@ -53,6 +53,19 @@ jobs:
           cargo test --release --locked -p orb-engine release_time_warp_32_voice_performance -- --nocapture
       - name: Portable Windows build
         run: cargo build --release --locked -p orb-ui
+      - name: Verify default DX12 startup
+        shell: pwsh
+        run: |
+          Remove-Item Env:WGPU_BACKEND -ErrorAction SilentlyContinue
+          $env:ORB_GPU_INFO = '1'
+          $graphicsShot = Join-Path $PWD 'dx12-startup.png'
+          $graphicsError = Join-Path $PWD 'dx12-startup.log'
+          $graphicsProcess = Start-Process -FilePath target/release/OpenRB-338.exe -WindowStyle Hidden -PassThru -RedirectStandardError $graphicsError -ArgumentList @('--demo', '--size', '1600x1000', '--screenshot', $graphicsShot)
+          if (-not $graphicsProcess.WaitForExit(45000)) { Stop-Process -Id $graphicsProcess.Id; throw 'DX12 startup timed out' }
+          $graphicsLog = Get-Content -Raw -LiteralPath $graphicsError
+          Write-Output $graphicsLog
+          if ($graphicsProcess.ExitCode -ne 0 -or !(Test-Path -LiteralPath $graphicsShot) -or $graphicsLog -notmatch 'gpu: Dx12') { throw 'Default startup did not render using DX12' }
+          Remove-Item Env:ORB_GPU_INFO
       - name: Capture the desktop interface
         shell: pwsh
         run: |
@@ -82,11 +95,13 @@ jobs:
           Copy-Item CHANGELOG.md midi-preview/
           Copy-Item ('docs/releases/' + $acidVersion + '.md') midi-preview/RELEASE-NOTES.md
           New-Item -ItemType Directory -Force -Path midi-preview/docs/releases,midi-preview/releases
-          Copy-Item ('docs/releases/' + $acidVersion + '.md') midi-preview/docs/releases/
-          Copy-Item ('docs/releases/' + $acidVersion + '.md') midi-preview/releases/
+          Copy-Item docs/releases/*.md midi-preview/docs/releases/
+          Copy-Item docs/releases/*.md midi-preview/releases/
           New-Item -ItemType Directory -Force -Path midi-preview/docs,midi-preview/assets/brand
           Copy-Item docs/acid-recall.md,docs/studio.md,docs/midi-controller.md,docs/midi-clock.md,docs/sampler-drums.md midi-preview/docs/
           Copy-Item docs/studio.md,docs/midi-controller.md,docs/midi-clock.md,docs/sampler-drums.md midi-preview/
+          Copy-Item docs/graphics-startup.md midi-preview/docs/
+          Copy-Item docs/graphics-startup.md midi-preview/README-GRAPHICS.md
           Copy-Item assets/brand/acid-recall.png,assets/brand/acid-recall.ico midi-preview/assets/brand/
           Copy-Item LICENSE midi-preview/
           Copy-Item docs/midi-controller.md midi-preview/README-MIDI.md
@@ -141,3 +156,36 @@ jobs:
           BUILD_SHA: ${{ github.sha }}
         shell: bash
         run: bash scripts/publish-acid-release.sh
+
+  publish-laptop-test:
+    name: Publish separate laptop compatibility test
+    needs: windows
+    if: github.ref == 'refs/heads/codex/windows-dx12-1.1'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ACID-RECALL-Windows-x64
+          path: midi-preview
+      - name: Publish V1.1 laptop test without replacing the stable download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=acid-recall-v1.1.0-laptop-test
+          asset=ACID-RECALL-1.1.0-LAPTOP-TEST-Windows-x64.zip
+          (cd midi-preview && zip -r "../${asset}" .)
+          cp midi-preview/RELEASE-NOTES.md laptop-notes.md
+          printf '\nBuild source: https://github.com/%s/commit/%s\n' "$GH_REPO" "$BUILD_SHA" >> laptop-notes.md
+          if gh release view "$tag" > /dev/null 2>&1; then
+            test "$(gh api "repos/${GH_REPO}/commits/${tag}" --jq .sha)" = "$BUILD_SHA"
+            gh release upload "$tag" "$asset" --clobber
+          else
+            if pinned_sha=$(gh api "repos/${GH_REPO}/commits/${tag}" --jq .sha 2>/dev/null); then test "$pinned_sha" = "$BUILD_SHA"; fi
+            gh release create "$tag" "$asset" --target "$BUILD_SHA" --title 'ACID RECALL 1.1 — Laptop compatibility test' --prerelease --latest=false --notes-file laptop-notes.md
+          fi

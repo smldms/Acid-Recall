@@ -3,6 +3,7 @@ use orb_ui::midi::{Binding, Config, targets};
 
 fn config() -> Config {
     Config {
+        keyboard: Default::default(),
         clock: Default::default(),
         enabled: true,
         port: Some("UC-33 on first PC".into()),

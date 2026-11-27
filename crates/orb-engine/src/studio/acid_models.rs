@@ -37,21 +37,28 @@ pub(super) struct State {
     phase: [f32; 4],
     feedback: f32,
     slave: f32,
-    history: [f32; 7],
-    head: usize,
+    previous: [f32; 5],
+}
+
+/// Arguments here are bounded by sanitized ratios, phase modulation depth and MIDI pitch.
+/// Integer truncation avoids general-purpose floating remainder in every operator.
+#[inline]
+fn wrap_cycle(x: f32) -> f32 {
+    let fraction = x - (x as i32) as f32;
+    if fraction < 0.0 { fraction + 1.0 } else { fraction }
+}
+
+#[inline]
+fn rate_gain(increment: f32) -> f32 {
+    ((0.49 - increment) * 12.5).clamp(0.0, 1.0)
 }
 
 impl State {
     /// One FM operator. Attenuate partials approaching the internal Nyquist frequency.
-    fn operator(bank: &Bank, phase: f32, offset: f32, increment: f32) -> f32 {
-        let gain = ((0.49 - increment) * 12.5).clamp(0.0, 1.0);
-        gain * bank.sine((phase + offset).rem_euclid(1.0))
-    }
-
-    fn fm(&mut self, bank: &Bank, c: &Controls, delta: f32) -> f32 {
-        let increments = [delta, delta * c.ratios[0], delta * c.ratios[1], delta * c.ratios[2]];
+    #[inline]
+    fn fm(&mut self, bank: &Bank, c: &Controls, increments: [f32; 4], gains: [f32; 4]) -> f32 {
         let phase = self.phase;
-        let op = |i: usize, pm: f32| Self::operator(bank, phase[i], pm, increments[i]);
+        let op = |i: usize, pm: f32| gains[i] * bank.sine(wrap_cycle(phase[i] + pm));
         let four = op(3, self.feedback * c.feedback);
         self.feedback = (self.feedback + four) * 0.5;
         let index = c.index;
@@ -80,39 +87,47 @@ impl State {
             }
         };
         for (phase, inc) in self.phase.iter_mut().zip(increments) {
-            *phase = (*phase + inc).fract();
+            *phase = wrap_cycle(*phase + inc);
         }
         output
     }
 
-    fn sync_fold(&mut self, bank: &Bank, c: &Controls, delta: f32) -> f32 {
+    #[inline]
+    fn sync_fold(&mut self, bank: &Bank, c: &Controls, delta: f32, slave_delta: f32, gain: f32) -> f32 {
         let master = bank.sine(self.phase[0]);
-        let slave = Self::operator(bank, self.slave, 0.0, delta * c.sync_ratio);
+        let slave = gain * bank.sine(self.slave);
         let input = slave * c.fold;
-        let folded = 1.0 - ((input + 1.0).rem_euclid(4.0) - 2.0).abs();
+        let folded = 1.0 - (4.0 * wrap_cycle((input + 1.0) * 0.25) - 2.0).abs();
         let out = master + (folded - master) * c.mix;
 
         let next = self.phase[0] + delta;
-        self.phase[0] = next.fract();
+        self.phase[0] = wrap_cycle(next);
         self.slave = if next >= 1.0 {
             // Fractional reset retains the part of this sub-sample after master wrap.
-            (self.phase[0] * c.sync_ratio).fract()
+            wrap_cycle(self.phase[0] * c.sync_ratio)
         } else {
-            (self.slave + delta * c.sync_ratio).fract()
+            wrap_cycle(self.slave + slave_delta)
         };
         out
     }
 
     pub fn sample(&mut self, bank: &Bank, c: &Controls, increment: f32) -> f32 {
         let delta = increment * 0.5;
-        for _ in 0..2 {
-            let x = if c.mode == 3 { self.fm(bank, c, delta) } else { self.sync_fold(bank, c, delta) };
-            self.history[self.head] = x;
-            self.head = (self.head + 1) % 7;
-        }
-        // Seven-tap halfband decimator, unity DC gain. The centre tap is three sub-samples old.
-        let delayed = |n: usize| self.history[(self.head + 6 - n) % 7];
-        0.5 * delayed(3) + 0.2956 * (delayed(2) + delayed(4))
-            - 0.0456 * (delayed(0) + delayed(6))
+        let (even, odd) = if c.mode == 3 {
+            let increments = [delta, delta * c.ratios[0], delta * c.ratios[1], delta * c.ratios[2]];
+            let gains = increments.map(rate_gain);
+            let even = self.fm(bank, c, increments, gains);
+            (even, self.fm(bank, c, increments, gains))
+        } else {
+            let slave_delta = delta * c.sync_ratio;
+            let gain = rate_gain(slave_delta);
+            let even = self.sync_fold(bank, c, delta, slave_delta, gain);
+            (even, self.sync_fold(bank, c, delta, slave_delta, gain))
+        };
+        // The zero-valued halfband taps drop out. Keep only the five previous
+        // sub-samples needed after both new sub-samples have been calculated.
+        let [p0, p1, p2, _, p4] = self.previous;
+        self.previous = [odd, even, p0, p1, p2];
+        0.5 * p1 + 0.2956 * (p0 + p2) - 0.0456 * (odd + p4)
     }
 }

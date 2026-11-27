@@ -135,6 +135,20 @@ pub struct Studio {
     lane_duckers: [crate::sidechain::Ducker; LANES],
 }
 
+/// A replacement validated before it reaches the real-time thread.
+pub struct PreparedSettings(Box<Settings>);
+
+impl PreparedSettings {
+    pub fn new(mut settings: Box<Settings>) -> Self {
+        settings.sanitize();
+        Self(settings)
+    }
+
+    pub fn get(&self) -> &Settings { &self.0 }
+
+    pub fn into_inner(self) -> Box<Settings> { self.0 }
+}
+
 impl Studio {
     /// Prepare on a worker/UI thread, then transfer the box to the player.
     pub fn new(convolver: Box<Convolver>) -> Self {
@@ -164,8 +178,12 @@ impl Studio {
         }
     }
 
-    pub fn replace_settings(&mut self, mut settings: Box<Settings>) -> Box<Settings> {
-        settings.sanitize();
+    pub fn replace_settings(&mut self, settings: Box<Settings>) -> Box<Settings> {
+        self.replace_prepared_settings(PreparedSettings::new(settings))
+    }
+
+    pub fn replace_prepared_settings(&mut self, prepared: PreparedSettings) -> Box<Settings> {
+        let settings = prepared.into_inner();
         for (index, next) in settings.synth_slots.iter().enumerate() {
             if self.settings.synth_slots[index].enabled && !next.enabled {
                 self.synths[index].live_event(acid_live::Event::Panic, 0.0, 0.0);

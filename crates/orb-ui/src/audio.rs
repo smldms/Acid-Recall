@@ -38,6 +38,7 @@ impl App {
                     s.config.sample_rate,
                     s.config.channels,
                     s.callback_frames(),
+                    s.render_timing(),
                     s.resampled,
                     s.failure(),
                 )
@@ -202,7 +203,7 @@ impl App {
             }
             ui.separator();
             ui.strong("Currently active");
-            if let Some((backend, name, rate, channels, frames, resampled, error)) = &active {
+            if let Some((backend, name, rate, channels, frames, (peak, late), resampled, error)) = &active {
                 ui.label(format!("{backend} / {name}"));
                 ui.label(format!("{rate} Hz / {channels} channels"));
                 if *frames > 0 {
@@ -212,6 +213,15 @@ impl App {
                     ));
                 }
                 ui.small("Time shown is one buffer, not total audio or MIDI latency.");
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("Peak render load {peak:.1}%  /  buffers over budget {late}"))
+                        .on_hover_text("Above 100%, rendering took longer than the available buffer duration.");
+                    if ui.small_button("Reset counters").clicked()
+                        && let Some(stream) = self.audio_session.as_ref().and_then(|a| a.stream())
+                    {
+                        stream.reset_render_timing();
+                    }
+                });
                 if *resampled {
                     ui.small("The 44.1 kHz engine is resampled for this output.");
                 }

@@ -130,6 +130,7 @@ mod tests {
         for bars in [16, 32, 128] {
             let mut slot = Slot::default();
             slot.length = PhraseLength::Bars(bars);
+            slot.set_step_rate(48);
             let steps = phrase(&options, &source, 1, &slot, 901, false);
             assert_eq!(steps, phrase(&options, &source, 1, &slot, 901, false));
             for bar in steps.chunks_exact(16) {

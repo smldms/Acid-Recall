@@ -13,46 +13,57 @@ const TEAL: Color32 = Color32::from_rgb(115, 209, 193);
 const OCHRE: Color32 = Color32::from_rgb(237, 178, 112);
 const LILAC: Color32 = Color32::from_rgb(183, 163, 226);
 
-/// Draw a control inside the currently scoped module, with its own accessible keyboard target.
-fn dial(ui: &mut Ui, label: &str, value: &mut f32, ink: Color32, midi: &str) -> bool {
-    let initial = *value;
+/// Vertical drag, arrow keys and the secondary-button MIDI menu share the same control.
+fn rotary(ui: &mut Ui, label: &str, value: &mut f32, ink: Color32, midi: &str, bipolar: bool) {
+    let min = if bipolar { -1.0 } else { 0.0 };
+    let span = 1.0 - min;
+    let size = ui.available_width().clamp(32.0, 46.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click_and_drag());
+    let response = response.midi_menu(ui, midi);
+    if response.clicked() { response.request_focus(); }
+    if bipolar && response.double_clicked_by(egui::PointerButton::Primary) { *value = 0.0; }
+    if response.dragged_by(egui::PointerButton::Primary) {
+        let delta = ui.input(|i| -i.pointer.delta().y / if i.modifiers.shift { 800.0 } else { 145.0 });
+        *value = (*value + span * delta).clamp(min, 1.0);
+    }
+    if response.has_focus() {
+        ui.input(|i| {
+            let up = i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::ArrowRight);
+            let down = i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::ArrowLeft);
+            *value = (*value + (i32::from(up) - i32::from(down)) as f32 * 0.01).clamp(min, 1.0);
+        });
+    }
+    let center = rect.center();
+    let radius = size * 0.43;
+    let position = |fraction: f32, r: f32| {
+        let angle = (-0.75 + 1.5 * fraction) * PI;
+        center + Vec2::new(angle.sin(), -angle.cos()) * r
+    };
+    let arc = |start: f32, end: f32| (0..=32).map(|n| {
+        position(start + (end - start) * n as f32 / 32.0, radius)
+    }).collect::<Vec<_>>();
+    let fraction = (*value-min) / span;
+    let painter = ui.painter();
+    painter.circle_filled(center, radius - 3.0, Color32::from_rgb(40, 44, 45));
+    painter.add(egui::Shape::line(arc(0.0, 1.0), Stroke::new(2.5, BORDER)));
+    let zero = if bipolar { 0.5 } else { 0.0 };
+    if bipolar {
+        painter.line_segment([position(zero, radius-2.0),position(zero, radius+2.0)], Stroke::new(1.0, DIM));
+    }
+    painter.add(egui::Shape::line(arc(zero, fraction), Stroke::new(2.5, ink)));
+    painter.line_segment([position(fraction, radius * 0.47), position(fraction, radius * 0.74)], Stroke::new(2.0, INK));
+    if response.has_focus() {
+        painter.circle_stroke(center, radius + 3.0, Stroke::new(1.0, ink));
+    }
+    let tip = if bipolar { "Double-click to reset to zero." } else { "Hold Shift for fine adjustment." };
+    response.on_hover_text(format!("{label}: {:.0}%\nDrag or use arrow keys. {tip}", *value * 100.0));
+}
+
+fn dial(ui: &mut Ui, label: &str, value: &mut f32, ink: Color32, midi: &str) {
     ui.vertical_centered(|ui| {
-        let size = ui.available_width().clamp(32.0, 46.0);
-        let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click_and_drag());
-        let response = response.midi_menu(ui, midi);
-        if response.clicked() { response.request_focus(); }
-        if response.dragged_by(egui::PointerButton::Primary) {
-            let delta = ui.input(|i| {
-                -i.pointer.delta().y / if i.modifiers.shift { 800.0 } else { 145.0 }
-            });
-            *value = (*value + delta).clamp(0.0, 1.0);
-        }
-        if response.has_focus() {
-            ui.input(|i| {
-                let up = i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::ArrowRight);
-                let down = i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::ArrowLeft);
-                *value = (*value + (i32::from(up) - i32::from(down)) as f32 * 0.01).clamp(0.0, 1.0);
-            });
-        }
-        let center = rect.center();
-        let radius = size * 0.43;
-        let position = |fraction: f32, r: f32| {
-            let angle = (-0.75 + 1.5 * fraction) * PI;
-            center + Vec2::new(angle.sin(), -angle.cos()) * r
-        };
-        let arc = |end: f32| (0..=32).map(|n| position(end * n as f32 / 32.0, radius)).collect::<Vec<_>>();
-        let painter = ui.painter();
-        painter.circle_filled(center, radius - 3.0, Color32::from_rgb(40, 44, 45));
-        painter.add(egui::Shape::line(arc(1.0), Stroke::new(2.5, BORDER)));
-        painter.add(egui::Shape::line(arc(*value), Stroke::new(2.5, ink)));
-        painter.line_segment([position(*value, radius * 0.47), position(*value, radius * 0.74)], Stroke::new(2.0, INK));
-        if response.has_focus() {
-            painter.circle_stroke(center, radius + 3.0, Stroke::new(1.0, ink));
-        }
-        response.on_hover_text(format!("{label} · {:.0}%\nDrag or use arrow keys. Hold Shift for fine adjustment.", *value * 100.0));
+        rotary(ui, label, value, ink, midi, false);
         midi_label(ui, RichText::new(label).size(11.0).color(INK), midi);
     });
-    *value != initial
 }
 
 fn target(row: usize, field: &str) -> String {
@@ -140,16 +151,62 @@ fn oscillator_graph(ui: &mut Ui, patch: &Patch, macros: [f32; 4]) {
         graph(ui, TEAL, |x| 0.5 + cycle[(x * 180.0).round() as usize] * 0.44);
         return;
     }
-    graph(ui, TEAL, |x| {
-        let a = morph(x * 2.0, patch.wave_a);
-        let b = morph(x * 2.0 * 2.0_f32.powf(f32::from(patch.transpose_b) / 12.0), patch.wave_b);
-        let osc = match patch.osc_mode {
-            1 => a + (1.6 * a * b - a) * patch.mix,
-            2 => morph(x * 2.0 + 0.22 * b * patch.mix, patch.wave_a),
-            _ => a + (b - a) * patch.mix,
-        };
-        osc * 0.44 + 0.5
-    });
+    // Only oscillator controls invalidate the classic preview. Mixer, filter and envelope
+    // gestures repaint this panel continuously while leaving these partial sums identical.
+    let shape = [patch.wave_a, patch.wave_b, patch.mix, f32::from(patch.transpose_b), f32::from(patch.osc_mode)];
+    let key = ui.make_persistent_id("classic-oscillator-preview");
+    let saved = ui.ctx().data(|d| d.get_temp::<([f32; 5], [f32; 181])>(key));
+    let cycle = match saved {
+        Some((previous, trace)) if previous == shape => trace,
+        _ => {
+            let ratio = 2.0_f32.powf(f32::from(patch.transpose_b) / 12.0);
+            let trace = std::array::from_fn(|i| {
+                let phase = 2.0 * i as f32 / 180.0;
+                let a = morph(phase, patch.wave_a);
+                let b = morph(phase * ratio, patch.wave_b);
+                match patch.osc_mode {
+                    1 => a + (1.6 * a * b - a) * patch.mix,
+                    2 => morph(phase + 0.22 * b * patch.mix, patch.wave_a),
+                    _ => a + (b - a) * patch.mix,
+                }
+            });
+            ui.ctx().data_mut(|d| d.insert_temp(key, (shape, trace)));
+            trace
+        }
+    };
+    graph(ui, TEAL, |x| 0.5 + cycle[(x * 180.0).round() as usize] * 0.44);
+}
+
+/// The bright operators feed the output, the connecting arrows carry phase modulation.
+fn operator_network(ui: &mut Ui, algorithm: u8) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 49.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, SCREEN);
+    let (positions, edges, carriers): ([(f32, f32); 4], &[(usize, usize)], &[usize]) = match algorithm {
+        1 => ([(0.36, 0.5), (0.12, 0.5), (0.88, 0.5), (0.64, 0.5)], &[(1,0),(3,2)], &[0,2]),
+        2 => ([(0.87, 0.5), (0.11, 0.26), (0.38, 0.5), (0.11, 0.74)], &[(1,0),(2,0),(3,0)], &[0]),
+        3 => ([(0.87, 0.5), (0.5, 0.24), (0.5, 0.76), (0.13, 0.5)], &[(3,1),(3,2),(1,0),(2,0)], &[0]),
+        _ => ([(0.88, 0.5), (0.62, 0.5), (0.37, 0.5), (0.12, 0.5)], &[(3,2),(2,1),(1,0)], &[0]),
+    };
+    let nodes = positions.map(|(x,y)| rect.left_top() + Vec2::new(x * rect.width(), y * rect.height()));
+    for &(from, to) in edges {
+        let a = nodes[from] + Vec2::new(17.0, 0.0);
+        let b = nodes[to] - Vec2::new(17.0, 0.0);
+        let dir = (b-a).normalized();
+        painter.line_segment([a,b], Stroke::new(1.2, TEAL));
+        let tail = b - dir*5.0;
+        let perpendicular = Vec2::new(-dir.y,dir.x)*2.5;
+        painter.line_segment([tail+perpendicular,b], Stroke::new(1.2,TEAL));
+        painter.line_segment([tail-perpendicular,b], Stroke::new(1.2,TEAL));
+    }
+    for (i, &center) in nodes.iter().enumerate() {
+        let carrier = carriers.contains(&i);
+        let bounds = egui::Rect::from_center_size(center, Vec2::new(33.0, 17.0));
+        painter.rect_filled(bounds, 2.5, if carrier { TEAL } else { PANEL });
+        painter.rect_stroke(bounds, 2.5, Stroke::new(1.0, TEAL), egui::StrokeKind::Inside);
+        painter.text(center, egui::Align2::CENTER_CENTER, format!("OP{}", i+1),
+            egui::FontId::monospace(9.0), if carrier { SCREEN } else { INK });
+    }
 }
 
 fn envelope_graph(ui: &mut Ui, p: &Patch) {
@@ -206,18 +263,6 @@ fn modes(ui: &mut Ui, label: &str, midi: &str, value: &mut u8, names: &[&str]) {
     });
 }
 
-fn menu_choice(ui: &mut Ui, id: &str, value: &mut u8, names: &[&str]) {
-    let selection = usize::from(*value).min(names.len()-1);
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(names[selection])
-        .show_ui(ui, |ui| {
-            for (n, &name) in names.iter().enumerate() {
-                ui.selectable_value(value, n as u8, name).midi_menu(ui, id);
-            }
-        })
-        .response.midi_menu(ui, id);
-}
-
 fn matrix(ui: &mut Ui, row: usize, p: &mut Patch) {
     const SOURCES: [&str; 7] = ["Off", "LFO", "Amp env", "Timbre", "Movement", "Width", "Space"];
     let destinations = match p.osc_mode {
@@ -227,21 +272,66 @@ fn matrix(ui: &mut Ui, row: usize, p: &mut Patch) {
     };
     let active = p.routes.iter().filter(|route| route.source != 0 && route.amount != 0.0).count();
     egui::CollapsingHeader::new(RichText::new(format!("Modulation matrix   {active} / 4")).monospace().color(LILAC))
+        .id_salt(("acid-mod-matrix", row))
         .show(ui, |ui| {
-            egui::Grid::new("patch-modulation-routes").striped(true).min_col_width(80.0)
-                .show(ui, |ui| {
-                    for label in ["Source", "Destination", "Amount"] { ui.small(label); }
-                    ui.end_row();
-                    for (i, route) in p.routes.iter_mut().enumerate() {
-                        let route_id = format!("route{}", i + 1);
-                        menu_choice(ui, &target(row, &format!("{route_id}.source")), &mut route.source, &SOURCES);
-                        menu_choice(ui, &target(row, &format!("{route_id}.dest")), &mut route.dest, &destinations);
-                        let amount = target(row, &format!("{route_id}.amount"));
-                        ui.add(crate::midi::slider(ui, &mut route.amount, -1.0..=1.0)).midi_menu(ui, &amount);
-                        ui.end_row();
-                    }
+            for (i, route) in p.routes.iter_mut().enumerate() {
+                ui.push_id(("matrix-row", row, i), |ui| {
+                    if i > 0 { ui.separator(); }
+                    let route_id = format!("route{}", i + 1);
+                    let amount_id = target(row, &format!("{route_id}.amount"));
+                    let source_id = target(row, &format!("{route_id}.source"));
+                    let dest_id = target(row, &format!("{route_id}.dest"));
+                    let width = (ui.available_width() - 88.0).max(150.0);
+                    ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(Vec2::new(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                            ui.set_width(width);
+                            modes(ui, &format!("FROM {}", i + 1), &source_id, &mut route.source, &SOURCES);
+                            modes(ui, "TO", &dest_id, &mut route.dest, &destinations);
+                        });
+                        ui.allocate_ui_with_layout(Vec2::new(68.0, 0.0), egui::Layout::top_down(egui::Align::Center), |ui| {
+                            rotary(ui, "Route amount", &mut route.amount, LILAC, &amount_id, true);
+                            let label = format!("{:+.0}%", route.amount * 100.0);
+                            midi_label(ui, RichText::new(label).size(11.0).monospace().color(INK), &amount_id);
+                        });
+                    });
                 });
+            }
         });
+}
+
+fn preset_browser_id(row: usize) -> egui::Id {
+    egui::Id::unique(("acid-sound-preset-browser", row))
+}
+
+/// An in-flow list keeps left-click browsing independent of the viewport's MIDI context popup.
+fn preset_browser(ui: &mut Ui, row: usize, slot: &mut Slot) {
+    let mut selected = None;
+    let preset_id = target(row, "preset");
+    Frame::new().fill(PANEL).inner_margin(Margin::same(8)).corner_radius(4.0).show(ui, |ui| {
+        ui.columns(2, |columns| {
+            for (column, (start, end, title)) in columns.iter_mut().zip([
+                (0, EXPERIMENTAL_START, "Factory"),
+                (EXPERIMENTAL_START, PRESETS.len(), "Experimental"),
+            ]) {
+                column.strong(title);
+                egui::ScrollArea::vertical().id_salt(("preset-bank", row, start))
+                    .max_height(165.0).show(column, |ui| {
+                        for (i, (name, _)) in PRESETS.iter().enumerate().take(end).skip(start) {
+                            if ui.selectable_label(usize::from(slot.preset) == i, *name)
+                                .midi_menu(ui, &preset_id).clicked() {
+                                selected = Some(i);
+                            }
+                        }
+                    });
+            }
+        });
+    });
+    if let Some(index) = selected {
+        apply_preset(slot, index);
+    }
+    if selected.is_some() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        ui.ctx().data_mut(|d| d.insert_temp(preset_browser_id(row), false));
+    }
 }
 
 fn patch_panel(ui: &mut Ui, slot: &mut Slot, row: usize) -> (bool, bool) {
@@ -256,22 +346,18 @@ fn patch_panel(ui: &mut Ui, slot: &mut Slot, row: usize) -> (bool, bool) {
         let current = usize::from(slot.preset).min(PRESETS.len()-1);
         let suffix = if PRESETS[current].1 == slot.patch { "" } else { " *" };
         let preset_id = target(row, "preset");
-        egui::ComboBox::from_id_salt(("sound-preset", row)).width(195.0)
-            .selected_text(format!("{}{suffix}", PRESETS[current].0)).show_ui(ui, |ui| {
-                for (start, end, title) in [(0, EXPERIMENTAL_START, "Factory"), (EXPERIMENTAL_START, PRESETS.len(), "Experimental")] {
-                    if start != 0 { ui.separator(); }
-                    ui.strong(title);
-                    for (offset, (name, _)) in PRESETS[start..end].iter().enumerate() {
-                        let i = start + offset;
-                        if ui.selectable_label(i == current, *name).midi_menu(ui, &preset_id).clicked() {
-                            apply_preset(slot, i);
-                        }
-                    }
-                }
-            }).response.midi_menu(ui, &preset_id);
+        let picker_open = ui.ctx().data(|d| d.get_temp::<bool>(preset_browser_id(row))).unwrap_or(false);
+        let preset_button = ui.add_sized([195.0, 24.0], egui::Button::new(format!("{}{suffix}", PRESETS[current].0))
+            .selected(picker_open)).midi_menu(ui, &preset_id).on_hover_text("Choose a preset");
+        if preset_button.clicked() {
+            ui.ctx().data_mut(|d| d.insert_temp(preset_browser_id(row), !picker_open));
+        }
         audition = ui.button("Audition").midi_menu(ui, &target(row, "audition"))
             .on_hover_text("Play the selected chord for three seconds.").clicked();
     });
+    if ui.ctx().data(|d| d.get_temp::<bool>(preset_browser_id(row))).unwrap_or(false) {
+        preset_browser(ui, row, slot);
+    }
     ui.add_space(5.0);
     let p = &mut slot.patch;
     ui.columns(2, |cols| {
@@ -281,8 +367,7 @@ fn patch_panel(ui: &mut Ui, slot: &mut Slot, row: usize) -> (bool, bool) {
             match p.osc_mode {
                 3 => {
                     modes(ui, "FM ROUTING", &target(row, "fm_algorithm"), &mut p.fm_algorithm, &["Cascade", "Pairs", "Fan", "Branch"]);
-                    let network = ["4 → 3 → 2 → 1", "2 → 1   +   4 → 3", "(2 + 3 + 4) → 1", "4 → (2 + 3) → 1"];
-                    ui.monospace(network[usize::from(p.fm_algorithm).min(3)]);
+                    operator_network(ui, p.fm_algorithm);
                     ui.horizontal_wrapped(|ui| {
                         for (n, ratio) in p.fm_ratios.iter_mut().enumerate() {
                             let id = target(row, &format!("fm_ratio{}", n + 2));
@@ -396,21 +481,94 @@ mod tests {
         }
     }
 
-    fn frame(ctx: &egui::Context, slot: &mut Slot, events: Vec<egui::Event>) -> Vec<(String, Pos2)> {
+    fn panel_frame(ctx: &egui::Context, slot: &mut Slot, events: Vec<egui::Event>) -> (Vec<(String, Pos2)>, (bool, bool)) {
         let mut interaction = (false, false);
         let mut output = ctx.run_ui(
             egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(780.0, 1000.0))),
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(780.0, 1300.0))),
                 events,
                 ..Default::default()
             },
             |ui| { interaction = patch_panel(ui, slot, 1); },
         );
-        assert_eq!(interaction, (false, false), "secondary click edited or auditioned a patch");
         let mut labels = Vec::new();
         for clipped in &output.shapes { text_shapes(&clipped.shape, &mut labels); }
         output.textures_delta.clear();
+        (labels, interaction)
+    }
+
+    fn frame(ctx: &egui::Context, slot: &mut Slot, events: Vec<egui::Event>) -> Vec<(String, Pos2)> {
+        let (labels, interaction) = panel_frame(ctx, slot, events);
+        assert_eq!(interaction, (false, false), "secondary click edited or auditioned a patch");
         labels
+    }
+
+    fn primary(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+
+    fn click(ctx: &egui::Context, slot: &mut Slot, pos: Pos2) {
+        panel_frame(ctx, slot, vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] { panel_frame(ctx, slot, vec![primary(pos, pressed)]); }
+    }
+
+    fn position(labels: &[(String, Pos2)], text: &str) -> Pos2 {
+        labels.iter().find(|(s,_)| s == text).unwrap_or_else(|| panic!("missing {text}")).1
+    }
+
+    #[test]
+    fn primary_click_selects_factory_and_experimental_presets_in_edit_sound() {
+        let ctx = egui::Context::default();
+        let mut slot = Slot::default();
+        for index in [1, EXPERIMENTAL_START] {
+            let labels = panel_frame(&ctx, &mut slot, vec![]).0;
+            let current = PRESETS[usize::from(slot.preset)].0;
+            click(&ctx, &mut slot, position(&labels, current));
+            let labels = panel_frame(&ctx, &mut slot, vec![]).0;
+            assert!(labels.iter().any(|(s,_)| s == "Experimental"));
+            click(&ctx, &mut slot, position(&labels, PRESETS[index].0));
+            assert_eq!(slot.patch, PRESETS[index].1);
+            assert_eq!(usize::from(slot.preset), index);
+            let labels = panel_frame(&ctx, &mut slot, vec![]).0;
+            assert!(!labels.iter().any(|(s,_)| s == "Experimental"));
+        }
+    }
+
+    #[test]
+    fn choosing_connections_and_dragging_depth_keeps_the_matrix_expanded() {
+        let ctx = egui::Context::default();
+        let mut slot = Slot::default();
+        slot.patch = Patch::INIT;
+        panel_frame(&ctx, &mut slot, vec![]);
+        let labels = panel_frame(&ctx, &mut slot, vec![]).0;
+        let header = labels.iter().find(|(s,_)| s.contains("Modulation matrix")).unwrap().1;
+        click(&ctx, &mut slot, header);
+        // Let the normal collapsing-header animation settle before measuring control positions.
+        for _ in 0..24 { panel_frame(&ctx, &mut slot, vec![]); }
+        let labels = panel_frame(&ctx, &mut slot, vec![]).0;
+        // Route 1, as distinct from similarly named labels in the synthesis modules above.
+        let source_y = position(&labels, "FROM 1").y;
+        let select = |labels: &[(String, Pos2)], text: &str| -> Pos2 {
+            labels.iter().filter(|(s,pt)| s == text && pt.y >= source_y - 2.0)
+                .min_by(|a,b| a.1.y.total_cmp(&b.1.y)).unwrap().1
+        };
+        click(&ctx, &mut slot, select(&labels, "LFO"));
+        let labels = panel_frame(&ctx, &mut slot, vec![]).0;
+        click(&ctx, &mut slot, select(&labels, "Pitch"));
+        assert_eq!(slot.patch.routes[0].source, 1);
+        assert_eq!(slot.patch.routes[0].dest, 4);
+        let labels = panel_frame(&ctx, &mut slot, vec![]).0;
+        let knob = position(&labels, "+0%") - Vec2::new(0.0, 29.0);
+        panel_frame(&ctx, &mut slot, vec![egui::Event::PointerMoved(knob)]);
+        panel_frame(&ctx, &mut slot, vec![primary(knob,true)]);
+        let drag = knob + Vec2::new(0.0,35.0);
+        panel_frame(&ctx, &mut slot, vec![egui::Event::PointerMoved(drag)]);
+        panel_frame(&ctx, &mut slot, vec![primary(drag,false)]);
+        assert!(slot.patch.routes[0].amount < -0.05);
+        for _ in 0..24 { panel_frame(&ctx, &mut slot, vec![]); }
+        let labels = panel_frame(&ctx, &mut slot, vec![]).0;
+        assert!(labels.iter().any(|(s,_)| s.contains("Modulation matrix") && s.contains("1 / 4")));
+        assert!(labels.iter().any(|(s,_)| s == "FROM 4"));
     }
 
     #[test]
@@ -438,6 +596,7 @@ mod tests {
                     modifiers: Default::default(),
                 }]);
             }
+            frame(&ctx, &mut slot, vec![]);
             let labels = frame(&ctx, &mut slot, vec![]);
             assert!(labels.iter().any(|(name, _)| name == "MIDI LEARN..."), "{label}");
             let expected = crate::midi::label(&target(1, field));

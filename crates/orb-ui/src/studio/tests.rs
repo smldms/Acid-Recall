@@ -189,7 +189,7 @@ fn save_and_open_restore_embedded_sample_last_step_and_mix_settings() {
         finish(&mut app, &mut audio, &ctx);
         assert!(app.studio.notice.is_none(), "{:?}", app.studio.notice);
         assert!(path.is_file());
-        assert!(std::fs::read(&path).unwrap().starts_with(b"ORB338S4"));
+        assert!(std::fs::read(&path).unwrap().starts_with(b"ORB338S6"));
         assert!(!app.doc.modified);
         app.studio.settings.lanes[7].steps[1023] = 0;
         app.studio.settings.synth_slots = Default::default();

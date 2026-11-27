@@ -468,6 +468,15 @@ impl Panel {
     }
 
     fn set_event(&mut self, id: &str, value: i32) {
+        // Studio consumes sound controls once per frame. Keep the last value of a
+        // consecutive knob sweep; a preset, button or different control is a boundary.
+        if id.starts_with("acidsynth") && !id.ends_with(".preset")
+            && let Some(Event::Set { id: previous, value: pending }) = self.events.last_mut()
+            && previous.as_str() == id
+        {
+            *pending = value;
+            return;
+        }
         self.emit(Event::Set {
             id: id.into(),
             value,
@@ -512,7 +521,12 @@ impl Panel {
     /// Sets a knob position and sends the value when it changed.
     pub fn set_knob(&mut self, id: &str, p: i32) {
         let p = p.clamp(0, KNOB_MAX);
-        let old = self.knobs.insert(id.into(), p).unwrap_or(-1);
+        let old = if let Some(current) = self.knobs.get_mut(id) {
+            std::mem::replace(current, p)
+        } else {
+            self.knobs.insert(id.into(), p);
+            -1
+        };
         let changed = old < 0 || behavior::knob_send(old) != behavior::knob_send(p);
         if changed {
             self.set_event(id, behavior::knob_send(p));

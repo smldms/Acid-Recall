@@ -423,7 +423,7 @@ impl Pickup {
 /// Per-connection state, separate from saved assignments.
 #[derive(Default)]
 pub struct Router {
-    pickup: HashMap<(u8, String), Pickup>,
+    pickup: HashMap<u8, HashMap<String, Pickup>>,
     buttons: HashMap<(u8, u8, u8), bool>,
 }
 
@@ -478,7 +478,11 @@ impl Router {
                 let calibrated = continuous_value(cc.value, config.minimum_cc_for(input));
                 let value = range.map(calibrated);
                 let current = normalized(panel, id, k);
-                let state = self.pickup.entry((input, b.target.clone())).or_default();
+                let device = self.pickup.entry(input).or_default();
+                if !device.contains_key(id) {
+                    device.insert(b.target.clone(), Pickup::default());
+                }
+                let state = device.get_mut(id).expect("registered pickup target");
                 // Binary send buttons must turn an effect on/off on the first message,
                 // even when a continuous send assignment has soft takeover enabled.
                 let pickup = config.pickup && !(effect_send(id) && matches!(calibrated, 0 | 127));

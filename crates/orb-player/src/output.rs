@@ -4,8 +4,8 @@
 //! out unchanged (`x / 32768` as f32, converted to the device's sample format by cpal's
 //! `FromSample`). A device without 44.1 kHz gets the engine's output resampled to its default
 //! rate by rubato's asynchronous sinc resampler ([`rubato::Async::new_sinc`], 128 taps, a
-//! Blackman-Harris window, 256x oversampling, cubic interpolation), fed one engine call (1024
-//! frames) at a time (`FixedAsync::Input`); its buffers are allocated when the stream is built
+//! Blackman-Harris window, 256x oversampling, cubic interpolation), fed one native 64-frame
+//! block at a time (`FixedAsync::Input`); its buffers are allocated when the stream is built
 //! and `process_into_buffer` allocates nothing. Stereo goes to the first two channels of a
 //! device with more (the others are zero), and the mean of both to a mono device.
 //!
@@ -23,7 +23,7 @@ use rubato::{
     WindowFunction,
 };
 
-use crate::{Audio, CALL_FRAMES, RATE};
+use crate::{Audio, RATE};
 
 mod preferences;
 pub use preferences::{Catalog, Config, DeviceInfo, Session, backends, default_backend};
@@ -81,6 +81,17 @@ impl Stream {
     pub fn callback_frames(&self) -> usize {
         self.health.0.callback_frames.load(Ordering::Relaxed)
     }
+
+    /// Highest render time as a percentage of a buffer period, and over-budget callbacks.
+    pub fn render_timing(&self) -> (f64, u64) {
+        (self.health.0.peak_permille.load(Ordering::Relaxed) as f64 / 10.0,
+         self.health.0.over_budget.load(Ordering::Relaxed))
+    }
+
+    pub fn reset_render_timing(&self) {
+        self.health.0.peak_permille.store(0, Ordering::Relaxed);
+        self.health.0.over_budget.store(0, Ordering::Relaxed);
+    }
 }
 
 /// How long the data callback may stay silent after a stream error before the sound counts as
@@ -119,6 +130,8 @@ pub struct Health(Arc<HealthInner>);
 
 struct HealthInner {
     callback_frames: AtomicUsize,
+    peak_permille: AtomicU64,
+    over_budget: AtomicU64,
     /// The time of the last data callback.
     last_data: AtomicU64,
     /// Whether an error came after the last data callback.
@@ -142,6 +155,8 @@ impl Health {
     fn new(now: u64) -> Self {
         Health(Arc::new(HealthInner {
             callback_frames: AtomicUsize::new(0),
+            peak_permille: AtomicU64::new(0),
+            over_budget: AtomicU64::new(0),
             last_data: AtomicU64::new(now),
             pending: AtomicBool::new(false),
             fatal: AtomicBool::new(false),
@@ -300,7 +315,7 @@ impl Resample {
             rate as f64 / RATE as f64,
             1.1,
             &params,
-            CALL_FRAMES,
+            orb_engine::frame::BLOCK,
             2,
             FixedAsync::Input,
         )
@@ -308,7 +323,7 @@ impl Resample {
         let max = rs.output_frames_max();
         Ok(Resample {
             rs,
-            input: vec![0.0; 2 * CALL_FRAMES],
+            input: vec![0.0; 2 * orb_engine::frame::BLOCK],
             output: vec![0.0; 2 * max],
             len: 0,
             pos: 0,
@@ -320,7 +335,7 @@ impl Resample {
     /// the buffers or the resampler refuse (the sizes are the resampler's own, so only a defect
     /// or [`Output::inject_resampler_error`] gets there).
     fn chunk(&mut self, audio: &mut Audio) -> Option<usize> {
-        audio.render_f32(&mut self.input);
+        audio.render_device_f32(&mut self.input);
         // a forced error: an output buffer too small for the resampler
         let max = if self.fail_next {
             self.fail_next = false;
@@ -328,7 +343,7 @@ impl Resample {
         } else {
             self.output.len() / 2
         };
-        let inp = InterleavedSlice::new(&self.input[..], 2, CALL_FRAMES).ok()?;
+        let inp = InterleavedSlice::new(&self.input[..], 2, self.input.len() / 2).ok()?;
         let mut outp = InterleavedSlice::new_mut(&mut self.output[..], 2, max).ok()?;
         let (_, written) = self.rs.process_into_buffer(&inp, &mut outp, None).ok()?;
         Some(written)
@@ -422,7 +437,7 @@ impl Output {
             let frames = chunk.len() / ch;
             let s = &mut self.scratch[..2 * frames];
             match &mut self.resampler {
-                None => self.audio.render_f32(s),
+                None => self.audio.render_device_f32(s),
                 Some(r) => {
                     if !r.pull(&mut self.audio, s) {
                         failed = true;
@@ -516,14 +531,29 @@ fn build<T: SizedSample + FromSample<f32>>(
 ) -> Result<cpal::Stream, Error> {
     let h = health.clone();
     let channels = config.channels as usize;
+    let rate = u64::from(config.sample_rate);
     device
         .build_output_stream::<T, _, _>(
             config,
             move |data: &mut [T], _| {
+                let started = Instant::now();
                 out.output.as_mut().unwrap().fill(data);
-                h.0.callback_frames
-                    .store(data.len() / channels, Ordering::Relaxed);
-                h.data(h.now());
+                let finished = Instant::now();
+                let frames = data.len() / channels;
+                h.0.callback_frames.store(frames, Ordering::Relaxed);
+                if frames != 0 {
+                    let elapsed = finished.duration_since(started).as_nanos() as u64;
+                    let work = elapsed.saturating_mul(rate);
+                    let budget = frames as u64 * 1_000_000;
+                    let permille = work / budget;
+                    if permille > h.0.peak_permille.load(Ordering::Relaxed) {
+                        h.0.peak_permille.fetch_max(permille, Ordering::Relaxed);
+                    }
+                    if work > budget * 1000 {
+                        h.0.over_budget.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                h.data(finished.duration_since(h.0.origin).as_millis() as u64);
             },
             move |e: cpal::Error| {
                 // the rule is in `Health`; the log is one line a second, with a count

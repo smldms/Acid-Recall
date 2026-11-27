@@ -75,7 +75,12 @@ pub(super) fn queue(ui: &Ui, action: Action) {
 }
 
 pub(super) fn snapshot(ctx: &Context, config: &Config) {
-    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("midi-context-config"), config.clone()));
+    ctx.data_mut(|data| {
+        let snapshot = data.get_temp_mut_or_default::<Config>(egui::Id::unique("midi-context-config"));
+        if snapshot != config {
+            snapshot.clone_from(config);
+        }
+    });
 }
 
 pub(crate) trait MidiMenu {

@@ -11,6 +11,7 @@ const MAGIC: &[u8; 8] = b"ORB338S2";
 const SYNTH_MAGIC: &[u8; 8] = b"ORB338S3";
 const EXTENDED_SYNTH_MAGIC: &[u8; 8] = b"ORB338S4";
 const HYBRID_SYNTH_MAGIC: &[u8; 8] = b"ORB338S5";
+const BAR_RATE_MAGIC: &[u8; 8] = b"ORB338S6";
 const MAX_BYTES: usize = 256 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
 
@@ -101,7 +102,10 @@ impl Project {
                 || patch.fm_index != Patch::INIT.fm_index || patch.fm_feedback != Patch::INIT.fm_feedback
                 || patch.fold != Patch::INIT.fold || patch.sync != Patch::INIT.sync
         });
-        let version = if needs_hybrid { HYBRID_SYNTH_MAGIC } else if has_synth_data { EXTENDED_SYNTH_MAGIC } else { MAGIC };
+        let uses_bar_grid = self.metadata.settings.synth_slots.iter().any(|slot| {
+            slot.legacy_128_bars || matches!(slot.length, orb_engine::studio::acid_synth::PhraseLength::Bars(_))
+        });
+        let version = if uses_bar_grid { BAR_RATE_MAGIC } else if needs_hybrid { HYBRID_SYNTH_MAGIC } else if has_synth_data { EXTENDED_SYNTH_MAGIC } else { MAGIC };
         let mut out = version.to_vec();
         let metadata = toml::to_string(&self.metadata).map_err(|e| e.to_string())?;
         if metadata.len() > MAX_METADATA_BYTES {
@@ -128,16 +132,22 @@ impl Project {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() > MAX_BYTES || ![MAGIC, SYNTH_MAGIC, EXTENDED_SYNTH_MAGIC, HYBRID_SYNTH_MAGIC]
+        if bytes.len() > MAX_BYTES || ![MAGIC, SYNTH_MAGIC, EXTENDED_SYNTH_MAGIC, HYBRID_SYNTH_MAGIC, BAR_RATE_MAGIC]
             .iter().any(|magic| bytes.starts_with(&magic[..]))
         {
-            return Err("Not a supported Studio project (expected ORB338S2 through ORB338S5)".into());
+            return Err("Not a supported Studio project (expected ORB338S2 through ORB338S6)".into());
         }
+        let legacy_bar_grid = !bytes.starts_with(BAR_RATE_MAGIC);
         let mut bytes = &bytes[8..];
         let mut metadata: Metadata = toml::from_str(
             std::str::from_utf8(take(&mut bytes, MAX_METADATA_BYTES)?).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
+        if legacy_bar_grid {
+            for slot in &mut metadata.settings.synth_slots {
+                slot.migrate_legacy_bar_grid();
+            }
+        }
         if metadata
             .settings
             .lanes
@@ -243,6 +253,34 @@ mod tests {
         assert!(encoded.starts_with(HYBRID_SYNTH_MAGIC));
         let decoded = Project::decode(&encoded).unwrap();
         assert_eq!(decoded.metadata.settings.synth_slots, project.metadata.settings.synth_slots);
+    }
+
+    #[test]
+    fn old_bar_projects_reopen_on_the_original_grid_and_keep_all_hidden_steps() {
+        use orb_engine::studio::acid_synth::PhraseLength;
+        let mut project = Project::decode(include_bytes!("../../../../assets/demos/Low-Orbit.recall")).unwrap();
+        let slot = &mut project.metadata.settings.synth_slots[1];
+        slot.set_length(PhraseLength::Bars(128));
+        slot.set_step_rate(384); // Older releases stored this Steps-mode rate but played bars at 48.
+        slot.step_mut(2047).notes = [50, 57, 60, 65];
+        let mut bytes = project.encode().unwrap();
+        for magic in [EXTENDED_SYNTH_MAGIC, HYBRID_SYNTH_MAGIC] {
+            bytes[..8].copy_from_slice(magic);
+            let legacy = Project::decode(&bytes).unwrap();
+            let mut restored = Project::decode(&legacy.encode().unwrap()).unwrap();
+            let slot = &mut restored.metadata.settings.synth_slots[1];
+            assert_eq!((slot.step_count(), slot.ticks_per_step()), (2048, 48));
+            assert_eq!(slot.step(2047).notes, [50, 57, 60, 65]);
+            slot.set_length(PhraseLength::Steps(16));
+            assert_eq!(slot.ticks_per_step(), 384);
+            slot.set_length(PhraseLength::Bars(2));
+            assert_eq!((slot.step_count(), slot.ticks_per_step()), (4, 384));
+            assert!(slot.legacy_128_bars);
+            let encoded = restored.encode().unwrap();
+            assert!(encoded.starts_with(BAR_RATE_MAGIC));
+            let new = Project::decode(&encoded).unwrap();
+            assert_eq!(new.metadata.settings.synth_slots, restored.metadata.settings.synth_slots);
+        }
     }
 
     #[test]

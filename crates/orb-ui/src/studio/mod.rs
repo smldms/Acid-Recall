@@ -103,12 +103,14 @@ pub struct StudioUi {
     ready: bool,
     sent: Settings,
     revision: u64,
+    midi_mirror_state: Option<(u64, crate::sidechain::Settings)>,
     worker: Option<mpsc::Receiver<Result<Completed, String>>>,
     clipboard: Option<[u8; 16]>,
 }
 
 impl Default for StudioUi {
     fn default() -> Self {
+        let settings = Settings::default();
         let mut state = Self {
             history: Default::default(),
             history_backup: None,
@@ -122,7 +124,8 @@ impl Default for StudioUi {
             sampler_open: false,
             warp_editor: None,
             reverb_open: false,
-            settings: Settings::default(),
+            sent: settings.clone(),
+            settings,
             names: std::array::from_fn(|i| format!("Sample {:02}", i + 1)),
             waves: std::array::from_fn(|_| None),
             ir: None,
@@ -138,8 +141,8 @@ impl Default for StudioUi {
             opening: false,
             mix: None,
             ready: false,
-            sent: Settings::default(),
             revision: 0,
+            midi_mirror_state: None,
             worker: None,
             clipboard: None,
         };
@@ -191,6 +194,12 @@ impl StudioUi {
         self.content = true;
         self.revision = self.revision.wrapping_add(1);
     }
+
+    /// Only the scalar controls shared by the SPACE editor and its rack card.
+    fn reverb_controls(&self) -> (bool, [f64; 5], [f64; 4], f64) {
+        let s = &self.settings;
+        (s.enabled, [s.return_gain, s.predelay_ms, s.width, s.low_cut, s.high_cut], s.sends, s.sampler_bus.reverb_send)
+    }
 }
 
 impl App {
@@ -213,6 +222,11 @@ impl App {
     }
 
     pub(crate) fn studio_poll(&mut self, ctx: &Context) {
+        self.studio_receive();
+        self.studio_finish(ctx);
+    }
+
+    pub(crate) fn studio_receive(&mut self) {
         let result = self
             .studio
             .worker
@@ -324,6 +338,9 @@ impl App {
                 }
             }
         }
+    }
+
+    fn studio_finish(&mut self, ctx: &Context) {
         let mix = (
             self.settings.sidechain.clone(),
             self.settings.closed_hat_level,
@@ -346,6 +363,11 @@ impl App {
             self.studio.settings.sanitize();
             self.studio.sent = self.studio.settings.clone();
             self.studio_command(Command::StudioSettings(Box::new(self.studio.sent.clone())));
+            self.studio_mirror();
+        } else if !self.studio.midi_mirror_state.as_ref().is_some_and(|(revision, duck)| {
+            *revision == self.studio.revision && duck == &self.settings.sidechain
+        }) {
+            self.studio_mirror();
         }
         if self.studio.worker.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(40));

@@ -111,7 +111,8 @@ impl Default for PhraseLength {
 impl PhraseLength {
     fn valid(self) -> Self {
         match self {
-            Self::Bars(16 | 32 | 64 | 128) | Self::Steps(16 | 32 | 64 | 128) => self,
+            Self::Bars(1 | 2 | 4 | 8 | 16 | 32 | 64 | 128)
+            | Self::Steps(16 | 32 | 64 | 128) => self,
             _ => Self::default(),
         }
     }
@@ -129,6 +130,11 @@ pub struct Slot {
     pub steps: [Step; 16],
     pub step_ticks: u16,
     pub length: PhraseLength,
+    /// Original bar patterns always played at 48 ticks, even if their Steps rate was different.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legacy_bar_ticks: Option<u16>,
+    /// Keep 128 bars accessible when revisiting an old phrase after temporarily shortening it.
+    pub legacy_128_bars: bool,
     /// Steps after the first page. Only edited pages consume space in a saved project.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tail: Vec<Step>,
@@ -142,7 +148,8 @@ impl Default for Slot {
         Self {
             enabled: false, sequence_enabled: true, preset: 0, patch: super::acid_presets::PRESETS[0].1,
             macros: [0.5, 0.35, 0.45, 0.25], steps, step_ticks: 192,
-            length: PhraseLength::default(), tail: Vec::new(),
+            length: PhraseLength::default(), legacy_bar_ticks: None, legacy_128_bars: false,
+            tail: Vec::new(),
         }
     }
 }
@@ -151,15 +158,42 @@ impl Slot {
     pub fn step_count(&self) -> usize {
         match self.length.valid() {
             PhraseLength::Steps(n) => usize::from(n),
-            PhraseLength::Bars(n) => 16 * usize::from(n),
+            PhraseLength::Bars(n) => usize::from(n) * 768 / usize::from(self.ticks_per_step()),
         }
     }
 
     pub fn ticks_per_step(&self) -> u16 {
         match self.length.valid() {
             PhraseLength::Steps(_) => self.step_ticks.clamp(1, 768),
-            PhraseLength::Bars(_) => 48,
+            PhraseLength::Bars(_) => {
+                let ticks = self.legacy_bar_ticks.unwrap_or(self.step_ticks);
+                [48u16, 96, 192, 384, 768]
+                    .into_iter()
+                    .min_by_key(|rate| rate.abs_diff(ticks))
+                    .unwrap_or(48)
+            }
         }
+    }
+
+    pub fn migrate_legacy_bar_grid(&mut self) {
+        self.legacy_128_bars |= self.length == PhraseLength::Bars(128)
+            || self.tail.len() + 16 > 64 * 16;
+        if matches!(self.length, PhraseLength::Bars(_)) && self.step_ticks != 48 {
+            self.legacy_bar_ticks = Some(48);
+        }
+    }
+
+    pub fn set_step_rate(&mut self, ticks: u16) {
+        self.step_ticks = ticks;
+        self.legacy_bar_ticks = None;
+    }
+
+    pub fn set_length(&mut self, length: PhraseLength) {
+        self.legacy_128_bars |= self.length == PhraseLength::Bars(128);
+        if matches!(length, PhraseLength::Steps(_)) {
+            self.legacy_bar_ticks = None;
+        }
+        self.length = length;
     }
 
     pub fn step(&self, index: usize) -> Step {
@@ -252,9 +286,10 @@ impl Bank {
     fn sine(&self, phase: f32) -> f32 {
         // rem_euclid can round a tiny negative input to exactly 1.0.
         let x = phase * TABLE as f32;
-        let i = x as usize & (TABLE - 1);
+        let whole = x as i32;
+        let i = whole as usize & (TABLE - 1);
         let sine = &self.0[0][0];
-        sine[i] + (sine[i + 1] - sine[i]) * x.fract()
+        sine[i] + (sine[i + 1] - sine[i]) * (x - whole as f32)
     }
 
     fn read(&self, level: usize, phase: f32, shape: f32) -> f32 {
@@ -625,21 +660,26 @@ mod tests {
     }
 
     #[test]
-    fn literal_bars_have_sixteen_steps_and_hidden_pages_survive_shortening() {
+    fn literal_bars_keep_their_duration_at_every_rate_and_retain_hidden_steps() {
         let mut slot = Slot::default();
-        slot.step_ticks = 384;
-        for n in [16, 32, 64, 128] {
-            slot.length = PhraseLength::Steps(n);
-            assert_eq!(slot.step_count(), usize::from(n));
-            assert_eq!(slot.ticks_per_step(), 384);
-            slot.length = PhraseLength::Bars(n);
-            assert_eq!(slot.step_count() * usize::from(slot.ticks_per_step()), usize::from(n) * 768);
+        for ticks in [48, 96, 192, 384, 768] {
+            slot.set_step_rate(ticks);
+            for n in [1, 2, 4, 8, 16, 32, 64, 128] {
+                slot.set_length(PhraseLength::Bars(n));
+                assert_eq!(slot.ticks_per_step(), ticks);
+                assert_eq!(slot.step_count() * usize::from(ticks), usize::from(n) * 768);
+            }
         }
         let chord = Step { notes: [47, 54, 59, 62], gate_steps: 512 };
         *slot.step_mut(2047) = chord;
-        slot.length = PhraseLength::Steps(16);
+        slot.set_length(PhraseLength::Bars(1));
+        assert_eq!(slot.step_count(), 1);
         slot.sanitize();
-        slot.length = PhraseLength::Bars(128);
+        slot.set_length(PhraseLength::Steps(16));
+        assert_eq!(slot.step_count(), 16);
+        slot.set_length(PhraseLength::Bars(128));
+        slot.set_step_rate(48);
+        assert_eq!(slot.step_count(), 2048);
         assert_eq!(slot.step(2047), chord);
         assert_eq!(slot.step(2046), Step::default());
     }
@@ -651,6 +691,7 @@ mod tests {
         let mut slot = Slot::default();
         slot.enabled = true;
         slot.length = PhraseLength::Bars(128);
+        slot.set_step_rate(48);
         slot.steps = [Step::default(); 16];
         *slot.step_mut(1024) = Step { notes: [61, 66, 71, 76], gate_steps: 512 };
         let mut bus = [0.0; 64];

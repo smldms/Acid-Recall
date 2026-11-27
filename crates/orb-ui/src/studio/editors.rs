@@ -123,8 +123,7 @@ impl App {
         }
         self.warp_editor(ctx);
         self.legacy_fx_editor(ctx);
-        self.studio_mirror();
-        self.studio_poll(ctx);
+        self.studio_finish(ctx);
         if self.studio.worker.is_some() && !self.studio.modern {
             egui::Window::new("Preparing Studio")
                 .collapsible(false)
@@ -149,7 +148,7 @@ impl App {
     }
 
     fn reverb_editor(&mut self, ctx: &Context) {
-        let before = self.studio.settings.clone();
+        let before = self.studio.reverb_controls();
         let mut open = true;
         let busy = self.studio.worker.is_some() || !self.studio.ready;
         let mut build = None;
@@ -277,7 +276,7 @@ impl App {
                 );
             });
         self.studio.reverb_open = open;
-        if self.studio.settings != before {
+        if self.studio.reverb_controls() != before {
             self.studio.changed();
             self.doc.modified = true;
         }
@@ -287,7 +286,6 @@ impl App {
     }
 
     fn sampler_editor(&mut self, ctx: &Context) {
-        let before = self.studio.settings.clone();
         let mut open = true;
         let mut load = None;
         let mut audition = None;
@@ -726,7 +724,7 @@ impl App {
                 );
             });
         self.studio.sampler_open = open;
-        if self.studio.settings != before {
+        if self.sampler_history_poll(ctx) {
             self.studio.changed();
             self.doc.modified = true;
         }

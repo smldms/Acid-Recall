@@ -49,22 +49,18 @@ impl Fft {
         }
         let mut width = 2;
         while width <= n {
-            for start in (0..n).step_by(width) {
-                for j in 0..width / 2 {
-                    let mut w = self.roots[j * n / width];
-                    if inverse {
-                        w.im = -w.im;
-                    }
-                    let b = x[start + j + width / 2].mul(w);
-                    let a = x[start + j];
-                    x[start + j] = Complex {
-                        re: a.re + b.re,
-                        im: a.im + b.im,
-                    };
-                    x[start + j + width / 2] = Complex {
-                        re: a.re - b.re,
-                        im: a.im - b.im,
-                    };
+            // Width divides n exactly at each radix-2 stage. Walk precomputed
+            // roots by that stride rather than dividing inside every butterfly.
+            let stride = n / width;
+            for group in x.chunks_exact_mut(width) {
+                let (left, right) = group.split_at_mut(width / 2);
+                for ((low, high), &root) in left.iter_mut().zip(right).zip(self.roots.iter().step_by(stride)) {
+                    let mut w = root;
+                    if inverse { w.im = -w.im; }
+                    let b = high.mul(w);
+                    let a = *low;
+                    *low = Complex { re: a.re + b.re, im: a.im + b.im };
+                    *high = Complex { re: a.re - b.re, im: a.im - b.im };
                 }
             }
             width *= 2;

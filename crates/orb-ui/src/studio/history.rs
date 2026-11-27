@@ -23,6 +23,13 @@ pub(super) struct SamplerState {
 }
 
 impl SamplerState {
+    fn matches(&self, ui: &StudioUi) -> bool {
+        self.bus == ui.settings.sampler_bus
+            && self.names == ui.names
+            && self.waves.iter().zip(&ui.waves).all(|(a, b)| same_wave(a, b))
+            && self.lanes == ui.settings.lanes
+    }
+
     pub fn capture(ui: &StudioUi) -> Self {
         Self {
             lanes: ui.settings.lanes.clone(),
@@ -136,13 +143,20 @@ impl App {
             .reset(SamplerState::capture(&self.studio));
     }
 
-    pub(super) fn sampler_history_poll(&mut self, ctx: &Context) {
-        if !self.studio.history_restoring {
-            let state = SamplerState::capture(&self.studio);
-            self.studio
-                .history
-                .observe(state, ctx.input(|i| i.pointer.any_down()));
+    pub(super) fn sampler_history_poll(&mut self, ctx: &Context) -> bool {
+        if self.studio.history_restoring {
+            return false;
         }
+        let dragging = ctx.input(|i| i.pointer.any_down());
+        if self.studio.history.current.as_ref().is_some_and(|s| s.matches(&self.studio)) {
+            if !dragging {
+                self.studio.history.gesture = false;
+            }
+            return false;
+        }
+        let state = SamplerState::capture(&self.studio);
+        self.studio.history.observe(state, dragging);
+        true
     }
 
     pub(super) fn sampler_history_buttons(&mut self, ui: &mut Ui) {

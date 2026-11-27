@@ -611,7 +611,8 @@ impl App {
         self.audio_preferences_ui(ui.ctx());
         self.panel.restart_on_stop = self.studio.modern;
         self.studio.context = ui.ctx().clone();
-        self.studio_poll(ui.ctx());
+        // Settle background open/save before drawing. Flush this frame's edits after the editors.
+        self.studio_receive();
         if self.studio.opening {
             egui::Modal::new(egui::Id::unique("studio-opening")).show(ui.ctx(), |ui| {
                 ui.heading("Opening Studio project");
@@ -754,7 +755,7 @@ impl App {
             self.sidechain_button(ui, &view);
             self.studio_rack(ui, &view);
         }
-        self.studio_midi();
+        self.route_studio_midi();
         self.sync_effects(ui.ctx());
 
         // Send what was done, take what the engine did (the panel follows playback).

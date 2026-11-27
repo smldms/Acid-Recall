@@ -408,3 +408,40 @@ fn the_resampled_output_follows_the_engine() {
     let got = rms(&mut buf.iter().map(|&v| v as f64));
     assert!((got - want).abs() < 0.05 * want, "rms {got} against {want}");
 }
+
+#[test]
+fn small_device_callbacks_render_only_demanded_blocks_and_match_the_reference_mix() {
+    let track = diag("full_mix");
+    let (mut p, mut reference) = player(&track);
+    send(&mut p, Command::Play);
+    let expected = run(&mut reference, 36);
+    let (mut p, audio) = player(&track);
+    send(&mut p, Command::Play);
+    let mut device = Output::new(audio, 2, 44_100).unwrap();
+    let initial = device.audio().current().frame.blocks * 64;
+    let mut actual = vec![0.0_f32; expected.len()];
+    let mut pos = 0;
+    for frames in [32, 64, 96, 128, 192, 256, 71, 997].into_iter().cycle() {
+        let end = (pos + 2 * frames).min(actual.len());
+        device.fill(&mut actual[pos..end]);
+        let rendered = device.audio().current().frame.blocks * 64 - initial;
+        assert_eq!(rendered, (end as u64 / 2).next_multiple_of(64));
+        pos = end;
+        if pos == actual.len() { break; }
+    }
+    assert!(peak(&expected) > 100);
+    let mismatch = actual.iter().zip(&expected)
+        .position(|(&a, &e)| a != f32::from(e) / 32768.0);
+    assert_eq!(mismatch, None, "callback partitions changed the sound");
+}
+
+#[test]
+fn the_first_64_frame_48khz_callback_does_not_render_a_full_mme_buffer() {
+    let (mut p, audio) = player(&diag("303_slide_accent"));
+    send(&mut p, Command::Play);
+    let initial = audio.current().frame.blocks;
+    let mut device = Output::new(audio, 2, 48_000).unwrap();
+    device.fill(&mut [0.0_f32; 128]);
+    // Includes the sinc filter's initial lookahead, followed by normal block-sized pulls.
+    assert!(device.audio().current().frame.blocks - initial <= 4);
+}

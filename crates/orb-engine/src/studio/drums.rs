@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub const PATTERNS: usize = 32;
 pub const EXTRA_STEPS: usize = 48;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Pattern {
     /// Zero follows the native pattern length; only 32 and 64 extend it.
@@ -23,7 +23,7 @@ impl Default for Pattern {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Bank {
     pub patterns: Vec<Pattern>,

@@ -741,7 +741,6 @@ impl App {
     }
 
     pub(crate) fn graphite_sampler(&mut self, ui: &mut Ui, rect: Rect) {
-        let before = self.studio.settings.clone();
         let mut load = None;
         let mut audition = false;
         let selected = self.studio.selected.min(7);
@@ -948,7 +947,7 @@ impl App {
                 });
         });
         self.graphite_sampler_mixer(ui, mixer);
-        if self.studio.settings != before {
+        if self.sampler_history_poll(ui.ctx()) {
             self.studio.changed();
             self.doc.modified = true;
         }
@@ -966,7 +965,7 @@ impl App {
     }
 
     pub(crate) fn graphite_fx(&mut self, ui: &mut Ui, rect: Rect) {
-        let before = self.studio.settings.clone();
+        let before = self.studio.reverb_controls();
         let width = rect.width();
         let gap = 7.0;
         let heights = [0.23, 0.18, 0.14, 0.14, 0.14, 0.17];
@@ -1188,7 +1187,7 @@ impl App {
                 }
             });
         }
-        if self.studio.settings != before {
+        if self.studio.reverb_controls() != before {
             self.studio.changed();
             self.doc.modified = true;
         }

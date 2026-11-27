@@ -264,11 +264,28 @@ impl App {
         });
     }
 
+    #[cfg(test)]
     pub(crate) fn studio_midi(&mut self) {
-        if self.studio.history_restoring {
+        self.route_studio_midi();
+        self.studio_mirror();
+    }
+
+    pub(crate) fn route_studio_midi(&mut self) {
+        if self.studio.history_restoring || !self.panel.events.iter().any(|event| {
+            let (Event::Press { id } | Event::Set { id, .. }) = event else { return false };
+            id.starts_with("acidsynth") || id.starts_with("sampler") || id.starts_with("studio.") || id.starts_with("duck")
+        }) {
             return;
         }
-        let before = self.studio.settings.clone();
+        // A MIDI batch can change patch controls, but never either slot's sequence.
+        let synth_controls = |s: &Settings| s.synth_slots.each_ref().map(|slot| {
+            (slot.patch, slot.preset, slot.macros, slot.sequence_enabled)
+        });
+        let synth_before = synth_controls(&self.studio.settings);
+        let space_before = self.studio.reverb_controls();
+        let bus_before = self.studio.settings.sampler_bus;
+        let trim_before = self.studio.settings.drum_gain_db;
+        let mut lanes_before: [Option<Lane>; 8] = Default::default();
         let duck_before = self.settings.sidechain.clone();
         let mut auditions = Vec::new();
         let mut acid_auditions = Vec::new();
@@ -285,6 +302,7 @@ impl App {
                     && let Some(wave) = &self.studio.waves[i]
                 {
                     let lane = &mut self.studio.settings.lanes[i];
+                    lanes_before[i].get_or_insert_with(|| lane.clone());
                     lane.fit_warp(Some(wave.frames.len()));
                 }
                 continue;
@@ -338,6 +356,7 @@ impl App {
                         }
                     } else if let Some((i, name)) = lane_field(id) {
                         let lane = &mut s.lanes[i];
+                        lanes_before[i].get_or_insert_with(|| lane.clone());
                         match name {
                             "level" => lane.gain = v * 2.0,
                             "pan" => lane.pan = v * 2.0 - 1.0,
@@ -392,7 +411,13 @@ impl App {
                 }
             }
         }
-        if self.studio.settings != before {
+        if synth_controls(&self.studio.settings) != synth_before
+            || self.studio.reverb_controls() != space_before
+            || self.studio.settings.sampler_bus != bus_before
+            || self.studio.settings.drum_gain_db != trim_before
+            || lanes_before.iter().zip(&self.studio.settings.lanes)
+                .any(|(before, lane)| before.as_ref().is_some_and(|old| old != lane))
+        {
             self.studio.changed();
             self.doc.modified = true;
         }
@@ -408,10 +433,13 @@ impl App {
                 self.audition_acid_patch(row);
             }
         }
-        self.studio_mirror();
+        // Editors and MIDI may change the same parameter this frame. Mirror their
+        // final result once, after sanitization in studio_finish.
+        self.studio.midi_mirror_state = None;
     }
 
     pub(crate) fn studio_mirror(&mut self) {
+        self.studio.midi_mirror_state = Some((self.studio.revision, self.settings.sidechain.clone()));
         let s = &self.studio.settings;
         for (id, _) in registered_controls() {
             if is_action(id) {

@@ -1369,9 +1369,24 @@ impl Engine {
     /// stereo into `buf[..2n]`, through the leftover block. A call with `n = 0` renders nothing
     /// but drops a pending leftover (`L` becomes `L - 64`).
     pub fn render(&mut self, buf: &mut [i16], n: usize) {
+        self.render_from_offset(buf, n, 0);
+    }
+
+    /// Render whole device blocks within a nominal MME call. Its simulated stack word and
+    /// output-end address affect the original PCF/distortion path. Keeping both across short
+    /// callbacks gives the same samples as rendering the entire 1024-frame call at once.
+    pub fn render_device_blocks(&mut self, buf: &mut [i16], n: usize, offset: usize) {
+        debug_assert!(offset.is_multiple_of(BLOCK) && n.is_multiple_of(BLOCK));
+        debug_assert!(offset + n <= export::REALTIME_FRAMES);
+        self.render_from_offset(buf, n, offset);
+    }
+
+    fn render_from_offset(&mut self, buf: &mut [i16], n: usize, offset: usize) {
         let n = n.min(MAX_FRAMES);
         // 0x10013A5E: the song's try-lock, before the leftover and the first block
-        self.frame.stack_word = Some(LOCK_WORD);
+        if offset == 0 {
+            self.frame.stack_word = Some(LOCK_WORD);
+        }
         let [ol, or] = &mut self.out;
         let lp = self.output.leftover_pos;
         let mut pos = 0usize;
@@ -1392,7 +1407,7 @@ impl Engine {
         while rem > 0 {
             let whole = rem > 63;
             let done = if whole {
-                self.frame.out_end = Some(OUT_RIGHT + 4 * (pos + BLOCK - 1) as i32);
+                self.frame.out_end = Some(OUT_RIGHT + 4 * (offset + pos + BLOCK - 1) as i32);
                 self.frame
                     .block(block_mut(&mut ol[..], pos), block_mut(&mut or[..], pos))
             } else {

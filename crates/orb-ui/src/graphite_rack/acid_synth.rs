@@ -1,6 +1,6 @@
 //! AcidSynth's live controls and polyphonic step editor for the two instrument slots.
 
-use super::{ACID, App, DIM, INK, NOTES, Rack, Ui, button, egui, mix_knob};
+use super::{ACID, App, DIM, NOTES, Rack, Ui, button, egui, mix_knob};
 use orb_engine::studio::acid_presets::{EXPERIMENTAL_START, PRESETS};
 use orb_engine::studio::acid_synth::{PhraseLength, Slot};
 
@@ -91,19 +91,14 @@ impl App {
             slot.sequence_enabled = !slot.sequence_enabled;
             changed = true;
         }
-        let bars = matches!(slot.length, PhraseLength::Bars(_));
         rack.text(ui, 30.0, y + 105.0, 9.0, "STEP RATE", DIM);
-        if bars {
-            rack.text(ui, 30.0, y + 133.0, 10.0, "1/16 per step", INK);
-        } else {
-            for (n, &(ticks, label)) in RATES.iter().enumerate() {
-                if button(
-                    ui, rack, rack.rect(28.0 + n as f32 * 36.0, y + 123.0, 34.0, 21.0),
-                    (row, "acid-rate", ticks), label, slot.step_ticks == ticks,
-                ).clicked() && slot.step_ticks != ticks {
-                    slot.step_ticks = ticks;
-                    changed = true;
-                }
+        for (n, &(ticks, label)) in RATES.iter().enumerate() {
+            if button(
+                ui, rack, rack.rect(28.0 + n as f32 * 36.0, y + 123.0, 34.0, 21.0),
+                (row, "acid-rate", ticks), label, slot.ticks_per_step() == ticks,
+            ).clicked() && slot.ticks_per_step() != ticks {
+                slot.set_step_rate(ticks);
+                changed = true;
             }
         }
         for (i, &(key, label)) in MACROS.iter().enumerate() {
@@ -130,6 +125,7 @@ impl App {
         let mut page = ui.ctx().data(|d| d.get_temp::<usize>(page_id)).unwrap_or(0);
         let count = match slot.length {
             PhraseLength::Steps(n) => format!("{n} steps"),
+            PhraseLength::Bars(1) => "1 bar".into(),
             PhraseLength::Bars(n) => format!("{n} bars"),
         };
         ui.scope_builder(
@@ -137,11 +133,27 @@ impl App {
                 .max_rect(rack.rect(405.0, y + 8.0, 85.0, 18.0)),
             |ui| {
                 egui::ComboBox::from_id_salt("length").width(ui.available_width()).selected_text(count).show_ui(ui, |ui| {
+                    for n in [1, 2, 4, 8, 16, 32, 64] {
+                        let length = PhraseLength::Bars(n);
+                        let label = if n == 1 { "1 bar".into() } else { format!("{n} bars") };
+                        if ui.selectable_label(slot.length == length, label).clicked() && slot.length != length {
+                            slot.set_length(length);
+                            changed = true;
+                        }
+                    }
+                    if slot.legacy_128_bars || slot.length == PhraseLength::Bars(128) {
+                        let length = PhraseLength::Bars(128);
+                        if ui.selectable_label(slot.length == length, "128 bars (legacy)").clicked() && slot.length != length {
+                            slot.set_length(length);
+                            changed = true;
+                        }
+                    }
+                    ui.separator();
                     for n in [16, 32, 64, 128] {
-                        for (length, unit) in [(PhraseLength::Steps(n), "steps"), (PhraseLength::Bars(n), "bars")] {
-                            if ui.selectable_value(&mut slot.length, length, format!("{n} {unit}")).changed() {
-                                changed = true;
-                            }
+                        let length = PhraseLength::Steps(n);
+                        if ui.selectable_label(slot.length == length, format!("{n} steps")).clicked() && slot.length != length {
+                            slot.set_length(length);
+                            changed = true;
                         }
                     }
                 });
@@ -168,14 +180,14 @@ impl App {
             (row, "acid-chord"), "CHORD LAB", false).clicked() {
             let selected = ui.ctx().data(|d| d.get_temp::<usize>(step_id(row))).unwrap_or(0);
             ui.ctx().data_mut(|d| {
-                d.insert_temp(step_id(row), page * 16 + selected % 16);
+                d.insert_temp(step_id(row), (page * 16 + selected % 16).min(slot.step_count() - 1));
                 d.insert_temp(chord_id, Some(row));
             });
             self.panel.focus = row;
         }
         let cursor = self.panel.transport.position.max(0) as usize
             / usize::from(slot.ticks_per_step().max(1)) % slot.step_count();
-        for column in 0..16 {
+        for column in 0..(slot.step_count() - page * 16).min(16) {
             let index = page * 16 + column;
             let step = slot.step(index);
             let root = step.notes.iter().copied().find(|&n| n != 0);
@@ -252,6 +264,28 @@ mod tests {
     }
 
     #[test]
+    fn one_bar_rate_buttons_resize_the_editable_grid_without_erasing_notes() {
+        let ctx = Context::default();
+        let mut app = App::new(Panel::new(), None);
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(WIDTH, HEIGHT));
+        let rack = Rack::fit(canvas);
+        let y = ROWS[0].0;
+        let slot = &mut app.studio.settings.synth_slots[0];
+        slot.enabled = true;
+        slot.set_length(PhraseLength::Bars(1));
+        slot.set_step_rate(48);
+        slot.step_mut(15).notes = [60, 67, 72, 0];
+        click(&ctx, &mut app, canvas, rack.rect(172.0, y + 123.0, 34.0, 21.0).center());
+        assert_eq!(app.studio.settings.synth_slots[0].step_count(), 1);
+        click(&ctx, &mut app, canvas, rack.rect(224.0 + 15.0 * 38.0, y + 126.0, 34.0, 27.0).center());
+        ctx.data(|d| assert!(d.get_temp::<Option<usize>>(egui::Id::unique("acid-chord-editor")).flatten().is_none()));
+        click(&ctx, &mut app, canvas, rack.rect(28.0, y + 123.0, 34.0, 21.0).center());
+        let slot = &app.studio.settings.synth_slots[0];
+        assert_eq!(slot.step_count(), 16);
+        assert_eq!(slot.step(15).notes, [60, 67, 72, 0]);
+    }
+
+    #[test]
     fn late_page_click_opens_chord_lab_on_the_absolute_step() {
         let ctx = Context::default();
         let mut app = App::new(Panel::new(), None);
@@ -261,6 +295,7 @@ mod tests {
         let slot = &mut app.studio.settings.synth_slots[0];
         slot.enabled = true;
         slot.length = PhraseLength::Bars(128);
+        slot.set_step_rate(48);
         ctx.data_mut(|data| data.insert_temp(egui::Id::unique(("acid-page", 0usize)), 127usize));
         click(&ctx, &mut app, canvas, rack.rect(224.0 + 15.0 * 38.0, y + 126.0, 34.0, 27.0).center());
         ctx.data(|data| {

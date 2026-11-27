@@ -21,11 +21,9 @@
 //! # Timing, as the original
 //!
 //! The engine renders in calls of [`CALL_FRAMES`] = 1024 frames, the frames of one MME buffer of
-//! the original (`docs/export_state.md` section 2.1), into a buffer the callback drains; the
-//! commands queued so far are applied at the start of each call, before it renders, as
-//! `SafeSoundCallback` drains the panel's messages before it renders (section 2.3). So a command
-//! takes effect at the next 64-frame block after the 1024-frame call that is playing, and the
-//! device's own buffer size does not change the engine's output. The original drains with a
+//! the original (`docs/export_state.md` section 2.1). Device callbacks split these calls at
+//! 64-frame block boundaries to match the number of frames the driver needs. The next slice
+//! applies queued controls before rendering. The original drains with a
 //! time budget (at least one message per call); the player drains every queued command.
 //!
 //! # Songs
@@ -376,7 +374,7 @@ pub struct Snapshot {
     pub closed_hat_level: u8,
     /// Current TB gain reductions, in percent, from the optional sidechain processor.
     pub sidechain_reduction: [u8; 2],
-    /// The frames the engine has rendered (44.1 kHz), a multiple of [`CALL_FRAMES`].
+    /// Frames rendered at 44.1 kHz, a multiple of the native 64-frame block size.
     pub frames: u64,
     /// The songs made current so far (0: the initial empty song).
     pub generation: u32,
@@ -440,10 +438,36 @@ pub struct Tracks {
     pub events: Pool,
 }
 
+enum Queued {
+    Command(Command),
+    StudioSettings(orb_engine::studio::PreparedSettings),
+}
+
+impl Queued {
+    fn from_command(command: Command) -> Self {
+        match command {
+            Command::StudioSettings(settings) =>
+                Self::StudioSettings(orb_engine::studio::PreparedSettings::new(settings)),
+            Command::Studio(mut studio) => {
+                studio.settings.sanitize();
+                Self::Command(Command::Studio(studio))
+            }
+            other => Self::Command(other),
+        }
+    }
+
+    fn into_command(self) -> Command {
+        match self {
+            Self::StudioSettings(settings) => Command::StudioSettings(settings.into_inner()),
+            Self::Command(command) => command,
+        }
+    }
+}
+
 /// The UI side.
 pub struct Player {
     midi_clock: Option<clock::Connection>,
-    commands: rtrb::Producer<Command>,
+    commands: rtrb::Producer<Queued>,
     garbage: rtrb::Consumer<Garbage>,
     snapshot: triple_buffer::Output<Snapshot>,
     tracks: triple_buffer::Output<Tracks>,
@@ -460,7 +484,7 @@ pub struct Audio {
     sidechain: orb_engine::sidechain::Config,
     current: Box<Engine>,
     pending: Option<Box<Engine>>,
-    commands: rtrb::Consumer<Command>,
+    commands: rtrb::Consumer<Queued>,
     garbage: rtrb::Producer<Garbage>,
     /// True only while the reclaimed engine is edited on the control thread.
     retire_immediately: bool,
@@ -624,7 +648,9 @@ impl Player {
                 "a song for this player is built by Player::build"
             );
         }
-        self.commands.push(c).map_err(|rtrb::PushError::Full(c)| c)
+        if self.commands.slots() == 0 { return Err(c); }
+        self.commands.push(Queued::from_command(c))
+            .map_err(|rtrb::PushError::Full(c)| c.into_command())
     }
 
     /// Drops what the callback handed back; returns how many boxes.
@@ -654,7 +680,7 @@ impl Audio {
     pub(crate) fn prepare_device_change(&mut self) {
         self.retire_immediately = true;
         while let Ok(command) = self.commands.pop() {
-            self.apply(command);
+            self.apply_queued(command);
         }
         self.apply(Command::StopReset);
         for slot in 0..2 {
@@ -699,7 +725,7 @@ impl Audio {
     /// Fills `out` (interleaved stereo int16 at 44.1 kHz, `out.len() / 2` frames) with the
     /// engine's output, running an engine call whenever the last one is used up.
     pub fn render_i16(&mut self, out: &mut [i16]) {
-        self.pull(out.len() / 2, |i, l, r| {
+        self.pull(out.len() / 2, false, |i, l, r| {
             out[2 * i] = l;
             out[2 * i + 1] = r;
         });
@@ -707,13 +733,23 @@ impl Audio {
 
     /// [`Audio::render_i16`] as f32 (`x / 32768`, exact).
     pub fn render_f32(&mut self, out: &mut [f32]) {
-        self.pull(out.len() / 2, |i, l, r| {
+        self.render_float(out, false);
+    }
+
+    /// Device callbacks can be much shorter than the native 1024-frame call. Render only
+    /// the requested blocks at a time so one short callback cannot inherit an entire call.
+    fn render_device_f32(&mut self, out: &mut [f32]) {
+        self.render_float(out, true);
+    }
+
+    fn render_float(&mut self, out: &mut [f32], device: bool) {
+        self.pull(out.len() / 2, device, |i, l, r| {
             out[2 * i] = l as f32 / 32768.0;
             out[2 * i + 1] = r as f32 / 32768.0;
         });
     }
 
-    fn pull(&mut self, frames: usize, mut put: impl FnMut(usize, i16, i16)) {
+    fn pull(&mut self, frames: usize, device: bool, mut put: impl FnMut(usize, i16, i16)) {
         if self
             .midi_clock
             .shared
@@ -729,7 +765,10 @@ impl Audio {
         let mut i = 0;
         while i < frames {
             if self.pos == self.buffer_len {
-                self.call();
+                let next = if device {
+                    (frames - i).min(CALL_FRAMES).next_multiple_of(orb_engine::frame::BLOCK)
+                } else { CALL_FRAMES };
+                self.call(next);
             }
             let n = (self.buffer_len - self.pos).min(frames - i);
             for k in 0..n {
@@ -741,20 +780,21 @@ impl Audio {
         }
     }
 
-    /// One engine call: the queued commands, then 1024 frames, then the snapshot.
-    fn call(&mut self) {
+    /// One render slice: apply queued commands, render complete blocks, then publish.
+    fn call(&mut self, quantum: usize) {
         while self.garbage.slots() >= GARBAGE_PER_COMMAND {
             let Ok(c) = self.commands.pop() else { break };
-            self.apply(c);
+            self.apply_queued(c);
         }
         // a faulting call writes nothing (`Engine::fault`): silence rather than the last call
-        self.buf.fill(0);
         let mode = self
             .midi_clock
             .shared
             .mode
             .load(std::sync::atomic::Ordering::Acquire);
-        let count = if mode == clock::OFF { CALL_FRAMES } else { 64 };
+        let offset = if mode == clock::OFF { self.frames as usize % CALL_FRAMES } else { 0 };
+        let count = if mode == clock::OFF { quantum.min(CALL_FRAMES - offset) } else { 64 };
+        self.buf[..2 * count].fill(0);
         let leaving_slave = self.midi_clock.was_slave() && mode != clock::SLAVE;
         if leaving_slave {
             if self.midi_clock.input.period > 0
@@ -785,7 +825,7 @@ impl Audio {
             self.follow_clock();
         }
         let faults = self.faults();
-        self.current.render(&mut self.buf[..2 * count], count);
+        self.current.render_device_blocks(&mut self.buf[..2 * count], count, offset);
         if self.garbage.slots() > 0
             && let Some(studio) = &mut self.current.frame.studio
             && let Some(old) = studio.retired()
@@ -908,6 +948,27 @@ impl Audio {
         }
     }
 
+    fn apply_queued(&mut self, queued: Queued) {
+        match queued {
+            Queued::Command(c) => self.apply(c),
+            Queued::StudioSettings(settings) => self.apply_studio_settings(settings),
+        }
+    }
+
+    fn apply_studio_settings(&mut self, settings: orb_engine::studio::PreparedSettings) {
+        let old = if let Some(studio) = &mut self.current.frame.studio {
+            for (channel, bank) in self.current.frame.devices.channels[2..]
+                .iter_mut().zip(&settings.get().drum_patterns)
+            {
+                channel.set_drum_bank(Some(bank.clone()));
+            }
+            studio.replace_prepared_settings(settings)
+        } else {
+            settings.into_inner()
+        };
+        self.throw(Garbage::StudioSettings(old));
+    }
+
     fn apply(&mut self, c: Command) {
         match c {
             Command::StudioClear => {
@@ -930,20 +991,7 @@ impl Audio {
                 }
             }
             Command::StudioSettings(settings) => {
-                if self.current.frame.studio.is_some() {
-                    for (channel, bank) in self.current.frame.devices.channels[2..]
-                        .iter_mut()
-                        .zip(&settings.drum_patterns)
-                    {
-                        channel.set_drum_bank(Some(bank.clone()));
-                    }
-                }
-                let old = if let Some(studio) = &mut self.current.frame.studio {
-                    studio.replace_settings(settings)
-                } else {
-                    settings
-                };
-                self.throw(Garbage::StudioSettings(old));
+                self.apply_studio_settings(orb_engine::studio::PreparedSettings::new(settings));
             }
             Command::StudioWave { lane, wave } => {
                 let old = if lane < 8

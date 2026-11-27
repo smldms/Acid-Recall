@@ -123,6 +123,30 @@ fn studio_drum_bank_replacement_and_clear_do_not_allocate_or_free_in_callback() 
 }
 
 #[test]
+fn a_live_keyboard_reaches_the_stopped_player_without_allocating() {
+    use orb_engine::studio::{Studio, acid_live::Event, convolution::Convolver};
+    let (mut player, mut audio) = Player::new(tables(), None);
+    let mut studio = Box::new(Studio::new(Box::new(Convolver::new(&[[0.0; 2]; 64]).unwrap())));
+    let slot = &mut studio.settings.synth_slots[0];
+    slot.enabled = true;
+    slot.sequence_enabled = false;
+    slot.patch.attack = 0.0;
+    send(&mut player, Command::Studio(studio));
+    send(&mut player, Command::Master(110));
+    send(&mut player, Command::MixerChannel { channel: 0, field: 1, value: 110 });
+    send(&mut player, Command::ChannelEnabled { channel: 0, on: true });
+    for (key, pitch) in [(1, 48), (2, 55), (3, 60)] {
+        send(&mut player, Command::AcidLive { slot: 0,
+            event: Event::On { key, pitch, velocity: 120, grid: 48 } });
+    }
+    let mut buf = [0i16; 2 * CALL_FRAMES];
+    assert_eq!(render(&mut audio, &mut buf, 5), 0);
+    assert!(buf.iter().any(|s| s.unsigned_abs() > 3), "stopped keyboard must reach audio output");
+    send(&mut player, Command::AcidLive { slot: 0, event: Event::Panic });
+    assert_eq!(render(&mut audio, &mut buf, 3), 0);
+}
+
+#[test]
 fn parallel_armed_tests_do_not_count_each_others_allocations() {
     use std::sync::{Arc, atomic::AtomicBool};
     let start = Arc::new(AtomicBool::new(false));

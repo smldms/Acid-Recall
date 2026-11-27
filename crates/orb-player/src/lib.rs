@@ -657,6 +657,9 @@ impl Audio {
             self.apply(command);
         }
         self.apply(Command::StopReset);
+        for slot in 0..2 {
+            self.apply(Command::AcidLive { slot, event: orb_engine::studio::acid_live::Event::Panic });
+        }
         self.retire_immediately = false;
         self.preview_on = false;
         self.pos = self.buffer_len;

@@ -95,11 +95,17 @@ unsafe extern "system" fn receive(
     _timestamp: usize,
 ) {
     // MIM_DATA; no MIDI_IO_STATUS flag was requested, so MIM_MOREDATA is not delivered.
-    if message != 0x3c3 || data == 0 {
+    if data == 0 {
         return;
     }
     // SAFETY: Input owns the context until a successful midiInClose. Callback only shares it.
     let callback = unsafe { &*(data as *const Callback) };
+    // MIM_CLOSE / MIM_ERROR: a missing final Note Off must not sustain a key indefinitely.
+    if matches!(message, 0x3c2 | 0x3c5) {
+        callback.dropped.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    if message != 0x3c3 { return; }
     if let Some(clock) = &callback.clock {
         clock.receive(word as u32);
     }

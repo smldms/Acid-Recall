@@ -30,6 +30,22 @@ pub(super) fn recover_v1(path: &Path, current: &mut Config) -> Result<usize, Str
         current.enabled |= old.enabled;
     }
     let old_ports = old.inputs();
+    for &(input, name) in &old_ports {
+        if !old.bindings.iter().any(|b| b.input == input)
+            || current.inputs().iter().any(|(_, n)| *n == name) {
+            continue;
+        }
+        // Append a missing device, preserving existing slot numbers and their bindings.
+        let reserved = current.bindings.iter().map(|b| usize::from(b.input)).max().unwrap_or(0);
+        let next = current.additional_inputs.len().max(reserved);
+        if next < 15 {
+            current.additional_inputs.resize_with(next, Default::default);
+            current.additional_inputs.push(super::InputSettings {
+                port: Some(name.to_owned()), minimum_cc: old.minimum_cc_for(input),
+                ..Default::default()
+            });
+        }
+    }
     for original in &old.bindings {
         let mut binding = original.clone();
         if let Some((_, name)) = old_ports.iter().find(|(i, _)| *i == original.input) {

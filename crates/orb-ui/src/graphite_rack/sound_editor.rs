@@ -219,7 +219,8 @@ fn matrix(ui: &mut Ui, p: &mut Patch) {
         });
 }
 
-fn patch_panel(ui: &mut Ui, slot: &mut Slot, row: usize) -> bool {
+fn patch_panel(ui: &mut Ui, slot: &mut Slot, row: usize) -> (bool, bool) {
+    let mut audition = false;
     let before = slot.patch;
     let initial_macros = slot.macros;
     let initial_preset = slot.preset;
@@ -237,6 +238,8 @@ fn patch_panel(ui: &mut Ui, slot: &mut Slot, row: usize) -> bool {
                     }
                 }
             });
+        audition = ui.button("Audition")
+            .on_hover_text("Play the selected chord for three seconds.").clicked();
     });
     ui.add_space(5.0);
     let p = &mut slot.patch;
@@ -284,21 +287,33 @@ fn patch_panel(ui: &mut Ui, slot: &mut Slot, row: usize) -> bool {
         });
     });
     matrix(ui, &mut slot.patch);
-    before != slot.patch || initial_macros != slot.macros || initial_preset != slot.preset
+    (before != slot.patch || initial_macros != slot.macros || initial_preset != slot.preset, audition)
 }
 
 impl App {
     pub(super) fn acid_editor(&mut self, ui: &mut Ui, row: usize, id: egui::Id) {
         let mut open = true;
         let mut changed = false;
+        let mut audition = false;
         let slot = &mut self.studio.settings.synth_slots[row];
         egui::Window::new(format!("AcidSynth {} / Sound editor", ["A","B"][row]))
             .open(&mut open).default_width(690.0).min_width(540.0).vscroll(true)
             .show(ui.ctx(), |ui| {
                 ui.visuals_mut().selection.bg_fill = Color32::from_rgb(56, 74, 71);
                 ui.visuals_mut().selection.stroke = Stroke::new(1.0, TEAL);
-                changed = patch_panel(ui, slot, row);
+                (changed, audition) = patch_panel(ui, slot, row);
             });
+        if audition {
+            let selected = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::unique(("acid-selected-step", row)))).unwrap_or(0);
+            let notes = slot.step(selected.min(slot.step_count()-1)).notes;
+            let notes = if notes.iter().any(|&note| note != 0) { notes } else { [48, 55, 60, 0] };
+            if let Some(link) = &mut self.link {
+                link.effect_command(orb_player::Command::AcidLive {
+                    slot: row,
+                    event: orb_engine::studio::acid_live::Event::Audition { notes, frames: 3 * 44_100 },
+                });
+            }
+        }
         if changed {
             self.studio.changed();
             self.doc.modified = true;

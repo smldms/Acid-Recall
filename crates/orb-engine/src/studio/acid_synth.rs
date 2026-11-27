@@ -7,7 +7,7 @@ use std::f32::consts::TAU;
 const RATE: f32 = 44100.0;
 const TABLE: usize = 512;
 const LEVELS: usize = 7;
-const VOICES: usize = 12;
+pub(super) const VOICES: usize = 12;
 
 /// One bipolar patch cable. Source zero disconnects the cable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -339,12 +339,14 @@ impl Instrument {
 
     fn start_live_notes(&mut self) {
         if !self.live.next.is_some_and(|next| next <= self.live.sample) { return; }
+        let mut reserved = [false; VOICES];
         for pending in &mut self.live.notes {
             if !pending.is_some_and(|n| n.onset <= self.live.sample) { continue; }
             let n = pending.take().unwrap();
             let index = self.voices.iter().position(|v| v.increment == 0.0).unwrap_or_else(||
-                self.voices.iter().enumerate().min_by(|(_, a), (_, b)|
+                self.voices.iter().enumerate().filter(|(i, _)| !reserved[*i]).min_by(|(_, a), (_, b)|
                     a.gain.total_cmp(&b.gain)).unwrap().0);
+            reserved[index] = true;
             let mut v = Self::voice(n.pitch, f64::INFINITY);
             v.velocity = f32::from(n.velocity) / 127.0;
             v.live_key = Some(n.key);

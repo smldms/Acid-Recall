@@ -23,7 +23,7 @@ pub(super) struct Pending {
 #[derive(Default)]
 pub(super) struct Queue {
     pub sample: u64,
-    pub notes: [Option<Pending>; 12],
+    pub notes: [Option<Pending>; super::acid_synth::VOICES],
     pub next: Option<u64>,
 }
 

@@ -105,8 +105,8 @@ impl Runtime {
         if config.mode == Mode::Off {
             return Ok(());
         }
-        if !cfg!(windows) {
-            return Err("MIDI Clock currently requires Windows.".into());
+        if !cfg!(any(windows, target_os = "linux")) {
+            return Err("MIDI Clock currently requires Windows or Linux.".into());
         }
         let output = if config.mode == Mode::Master {
             let name = config.output.as_deref().ok_or("Choose a Clock OUT port.")?;

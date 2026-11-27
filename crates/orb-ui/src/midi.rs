@@ -27,19 +27,24 @@ mod winmm;
 #[cfg(windows)]
 use winmm as backend;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod alsa;
+#[cfg(target_os = "linux")]
+use alsa as backend;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod backend {
     use super::Port;
 
     pub struct Input;
 
     pub fn ports() -> Result<Vec<Port>, String> {
-        Err("MIDI controller input is currently available on Windows only.".into())
+        Err("MIDI controller input is currently available on Windows and Linux.".into())
     }
 
     impl Input {
         pub fn open(_id: u32, _clock: Option<super::sync::Sender>) -> Result<Self, String> {
-            Err("MIDI controller input is currently available on Windows only.".into())
+            Err("MIDI controller input is currently available on Windows and Linux.".into())
         }
 
         pub fn drain(&self) -> Vec<u32> {
@@ -57,10 +62,10 @@ mod backend {
     pub struct Output;
     impl Output {
         pub fn open(_id: u32) -> Result<Self, String> {
-            Err("MIDI requires Windows.".into())
+            Err("MIDI requires Windows or Linux.".into())
         }
         pub fn send(&mut self, _word: u32) -> Result<(), String> {
-            Err("MIDI requires Windows.".into())
+            Err("MIDI requires Windows or Linux.".into())
         }
     }
     pub struct Timer;
@@ -844,7 +849,7 @@ impl App {
             .default_width(620.0)
             .vscroll(true)
             .show(ctx, |ui| {
-                ui.label("UC-33e / MIDI CC control - Windows");
+                ui.label("MIDI CC control");
                 ui.horizontal(|ui| {
                     import = ui.button("Import routing...").clicked();
                     export = ui.button("Export routing...").clicked();

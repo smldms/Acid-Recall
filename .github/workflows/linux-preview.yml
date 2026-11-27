@@ -28,6 +28,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: Set build metadata
         run: scripts/release-env.sh >> "$GITHUB_ENV"
+      - name: Test MIDI control and clock
+        run: cargo test --locked -p orb-ui --lib midi::
       - name: Build Linux binaries
         run: scripts/build.sh "$TARGET"
       - name: Package and test the AppImage

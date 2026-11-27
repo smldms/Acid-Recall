@@ -5,6 +5,8 @@ use crate::frame::Block;
 use std::f32::consts::TAU;
 #[path = "acid_models.rs"]
 mod models;
+#[path = "acid_phrase.rs"]
+mod phrase;
 
 const RATE: f32 = 44100.0;
 const TABLE: usize = 512;
@@ -166,6 +168,8 @@ pub struct Slot {
     /// Steps after the first page. Only edited pages consume space in a saved project.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tail: Vec<Step>,
+    #[serde(skip)]
+    prepared: phrase::Prepared,
 }
 
 impl Default for Slot {
@@ -178,12 +182,16 @@ impl Default for Slot {
             preset: 0, user_preset: String::new(), patch: super::acid_presets::PRESETS[0].1,
             macros: [0.5, 0.35, 0.45, 0.25], steps, step_ticks: 192,
             length: PhraseLength::default(), legacy_bar_ticks: None, legacy_128_bars: false,
-            tail: Vec::new(),
+            tail: Vec::new(), prepared: Default::default(),
         }
     }
 }
 
 impl Slot {
+    pub(super) fn prepare_phrase(&mut self) { self.prepared = phrase::Prepared::build(self); }
+
+    pub(super) fn phrase_fingerprint(&self) -> Option<u64> { self.prepared.fingerprint() }
+
     pub fn tb_active(&self) -> bool { self.tb_enabled.unwrap_or(!self.enabled) }
 
     pub fn editing_synth(&self) -> bool { self.edit_synth.unwrap_or(self.enabled) }
@@ -223,11 +231,13 @@ impl Slot {
     }
 
     pub fn set_step_rate(&mut self, ticks: u16) {
+        self.prepared = Default::default();
         self.step_ticks = ticks;
         self.legacy_bar_ticks = None;
     }
 
     pub fn set_length(&mut self, length: PhraseLength) {
+        self.prepared = Default::default();
         self.legacy_128_bars |= self.length == PhraseLength::Bars(128);
         if matches!(length, PhraseLength::Steps(_)) {
             self.legacy_bar_ticks = None;
@@ -245,6 +255,7 @@ impl Slot {
 
     /// Editor-side only. The audio thread exclusively uses the non-allocating reader.
     pub fn step_mut(&mut self, index: usize) -> &mut Step {
+        self.prepared = Default::default();
         assert!(index < MAX_STEPS);
         if index < 16 {
             return &mut self.steps[index];
@@ -407,6 +418,8 @@ impl Tuning {
 #[derive(Default, Clone, Copy)]
 struct Voice {
     live_key: Option<u16>,
+    sequenced: bool,
+    retiring: bool,
     live_release: Option<u64>,
     live_delay: u64,
     velocity: f32,
@@ -530,13 +543,28 @@ impl Instrument {
         let mut reserved = [false; VOICES];
         for (i, &note) in step.notes.iter().enumerate() {
             if note == 0 || step.notes[..i].contains(&note) { continue; }
-            let index = self.voices.iter().position(|v| v.increment == 0.0)
-                .unwrap_or_else(|| self.voices.iter().enumerate()
-                    .filter(|(i, _)| !reserved[*i])
-                    .min_by(|(_, a), (_, b)| a.gain.total_cmp(&b.gain)).unwrap().0);
+            let index = self.voices.iter().position(|v| v.increment == 0.0).or_else(||
+                self.voices.iter().enumerate()
+                    .filter(|(i, v)| !reserved[*i] && v.live_key.is_none())
+                    .min_by(|(_, a), (_, b)| a.gain.total_cmp(&b.gain)).map(|(i, _)| i));
+            let Some(index) = index else { break };
             reserved[index] = true;
-            self.voices[index] = Self::voice(bank, tuning, note, end_tick);
+            let mut voice = Self::voice(bank, tuning, note, end_tick);
+            voice.sequenced = true;
+            self.voices[index] = voice;
         }
+    }
+
+    /// Release only old pattern voices. Physical keys, pending keys and their release envelopes survive edits.
+    pub(super) fn phrase_changed(&mut self) {
+        for voice in &mut self.voices {
+            if voice.sequenced && voice.increment != 0.0 {
+                voice.end_tick = f64::NEG_INFINITY;
+                voice.retiring = true;
+            }
+        }
+        self.last_step = None;
+        self.last_tick = None;
     }
 
     /// Return before touching the legacy bus whenever AcidSynth is fully bypassed.
@@ -638,11 +666,19 @@ impl Instrument {
                 let n = (position.max(0.0) / span).floor() as i64;
                 next_step_tick = (n + 1) as f64 * span;
                 if self.last_step.is_none() {
-                    // Locate or enable mid-pattern: recover chords whose gates still span this step.
-                    for previous in n.saturating_sub(count as i64 - 1).max(0)..n {
+                    let mut chase = |previous: i64| {
                         let step = slot.step(previous as usize % count);
                         let end = (previous as f64 + f64::from(step.gate_steps.min(count as u16))) * span;
                         if end > position { self.trigger(bank, &tuning, step, end); }
+                    };
+                    if let Some(ages) = slot.prepared.prior(n as usize % count) {
+                        for &age in ages.iter().rev() {
+                            if age != 0 && i64::from(age) <= n { chase(n - i64::from(age)); }
+                        }
+                    } else {
+                        // Direct/offline users may freely edit the public Slot without preparing it.
+                        // Native full-settings messages always carry the prebuilt lookup.
+                        for previous in n.saturating_sub(count as i64 - 1).max(0)..n { chase(previous); }
                     }
                 }
                 if self.last_step != Some(n) {
@@ -672,7 +708,8 @@ impl Instrument {
                         v.decaying = v.gain >= 1.0;
                     }
                 } else {
-                    v.gain *= release;
+                    // At most a few milliseconds of the outgoing patch on a reroll.
+                    v.gain *= if v.retiring { release.min(0.94) } else { release };
                     if v.gain < 0.00001 { v.increment = 0.0; continue; }
                 }
                 let inc_a = v.tuned.a;
@@ -804,6 +841,65 @@ mod tests {
         let encoded = serde_json::to_string(&slot.patch).unwrap();
         assert_eq!(serde_json::from_str::<Patch>(&encoded).unwrap(), slot.patch);
         assert_eq!(slot.patch.lfo_period(), ("1/8 triplet", 64));
+    }
+
+    #[test]
+    fn replacing_a_playing_phrase_chases_mid_gate_without_releasing_live_keys() {
+        use crate::studio::{PreparedSettings, Studio, acid_live::Event, convolution::Convolver};
+        let mut studio = Studio::new(Box::new(Convolver::new(&[[1.0; 2]]).unwrap()));
+        let mut settings = studio.settings.clone();
+        let slot = &mut settings.synth_slots[0];
+        slot.enabled = true;
+        slot.steps = [Step::default(); 16];
+        slot.steps[0] = Step { notes: [48, 0, 0, 0], gate_steps: 12 };
+        slot.patch.attack = 0.0;
+        studio.replace_prepared_settings(PreparedSettings::new(settings));
+        let mut output = [0.0; 64];
+        let advance = 1.0 / 64.0;
+        studio.live_note(0, Event::On { key: 1, pitch: 82, velocity: 120, grid: 0 }, 960.0, advance);
+        studio.synth_channel(0, &mut output, 960.0, advance, true);
+        assert_eq!(studio.synths[0].last_step, Some(5));
+        assert!(studio.synths[0].voices.iter().any(|v| v.sequenced && v.end_tick == 2304.0));
+        studio.live_note(0, Event::On { key: 2, pitch: 83, velocity: 118, grid: 48 }, 961.0, advance);
+
+        let mut unchanged = studio.settings.clone();
+        unchanged.synth_slots[0].macros[0] = 0.9;
+        studio.replace_prepared_settings(PreparedSettings::new(unchanged));
+        assert_eq!(studio.synths[0].last_step, Some(5));
+
+        let mut next = studio.settings.clone();
+        let slot = &mut next.synth_slots[0];
+        slot.set_step_rate(96);
+        slot.steps[0] = Step { notes: [55, 62, 0, 0], gate_steps: 16 };
+        studio.replace_prepared_settings(PreparedSettings::new(next));
+        assert!(studio.synths[0].last_step.is_none());
+        for i in 0..4 {
+            studio.synth_channel(0, &mut output, 961.0 + f64::from(i), advance, true);
+        }
+        let synth = &studio.synths[0];
+        assert_eq!(synth.last_step, Some(10));
+        assert_eq!(synth.voices.iter().filter(|v| v.increment != 0.0 && v.sequenced && v.end_tick == 1536.0).count(), 2);
+        assert!(!synth.voices.iter().any(|v| v.increment != 0.0 && v.retiring));
+        assert!(synth.voices.iter().any(|v| v.live_key == Some(1)));
+        assert!(synth.live.notes.iter().flatten().any(|event| event.key == 2));
+    }
+
+    #[test]
+    fn prepared_chase_wraps_only_after_the_first_transport_pass() {
+        let mut slot = Slot::default();
+        slot.enabled = true;
+        slot.steps = [Step::default(); 16];
+        slot.steps[14] = Step { notes: [64, 0, 0, 0], gate_steps: 5 };
+        slot.prepare_phrase();
+        let bank = Bank::new();
+        let mut synth = Instrument::default();
+        let mut block = [0.0; 64];
+        synth.render(&bank, &slot, &mut block, 192.0, 0.01, true);
+        assert!(!synth.gate(192.0));
+        synth.render(&bank, &slot, &mut block, 17.0 * 192.0, 0.01, true);
+        assert!(synth.gate(17.0 * 192.0));
+        synth.render(&bank, &slot, &mut block, 19.0 * 192.0, 0.01, true);
+        assert!(!synth.gate(19.0 * 192.0));
     }
 
     #[test]

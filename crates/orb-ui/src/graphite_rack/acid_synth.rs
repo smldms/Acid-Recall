@@ -350,6 +350,29 @@ mod tests {
     }
 
     #[test]
+    fn pinned_choice_and_midi_update_the_same_visible_parameter() {
+        let ctx = Context::default();
+        let mut app = App::new(Panel::new(), None);
+        let id = "acidsynth2.filter_mode";
+        let (row, field) = crate::studio::midi::acid::target(id).unwrap();
+        let slot = &mut app.studio.settings.synth_slots[row];
+        slot.enabled = true;
+        slot.edit_synth = Some(true);
+        slot.patch.filter_mode = 0;
+        app.studio.main_panel.update(row, field, true);
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(WIDTH, HEIGHT));
+        let rack = Rack::fit(canvas);
+        click(&ctx, &mut app, canvas, rack.rect(470.0, ROWS[row].0+33.0, 43.0, 41.0).center());
+        assert_eq!(app.studio.settings.synth_slots[row].patch.filter_mode, 1);
+        app.studio_mirror();
+        assert_eq!(app.panel.value(id), Some(42));
+        app.panel.set_knob(id, 1000);
+        app.studio_midi();
+        assert_eq!(field.display(&app.studio.settings.synth_slots[row]), "Notch");
+        assert!(app.studio.main_panel.has(row, field));
+    }
+
+    #[test]
     fn one_bar_rate_buttons_resize_the_editable_grid_without_erasing_notes() {
         let ctx = Context::default();
         let mut app = App::new(Panel::new(), None);

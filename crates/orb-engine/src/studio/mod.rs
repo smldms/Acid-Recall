@@ -86,7 +86,10 @@ impl Default for Settings {
 
 impl Settings {
     pub fn sanitize(&mut self) {
-        for slot in &mut self.synth_slots { slot.sanitize(); }
+        for slot in &mut self.synth_slots {
+            slot.sanitize();
+            slot.prepare_phrase();
+        }
         self.sampler_bus.sanitize();
         fn finite(v: f64, lo: f64, hi: f64) -> f64 {
             if v.is_finite() { v.clamp(lo, hi) } else { lo }
@@ -208,7 +211,12 @@ impl Studio {
     pub fn replace_prepared_settings(&mut self, prepared: PreparedSettings) -> Box<Settings> {
         let settings = prepared.into_inner();
         for (index, next) in settings.synth_slots.iter().enumerate() {
-            if self.settings.synth_slots[index].enabled && !next.enabled {
+            let old = &self.settings.synth_slots[index];
+            if old.phrase_fingerprint() != next.phrase_fingerprint()
+                || old.sequence_enabled != next.sequence_enabled {
+                self.synths[index].phrase_changed();
+            }
+            if old.enabled && !next.enabled {
                 self.synths[index].live_event(acid_live::Event::Panic, 0.0, 0.0);
             }
         }

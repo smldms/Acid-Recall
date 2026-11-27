@@ -2,6 +2,7 @@
 use orb_engine::studio::acid_synth::{PhraseLength, Slot, Step};
 
 use super::{Options, Rng, pitch, steps303};
+use crate::model::Step303;
 
 pub(super) struct PadChange {
     pub row: usize,
@@ -13,7 +14,7 @@ pub(super) struct PadChange {
 
 impl PadChange {
     pub fn matches(&self, slot: &Slot) -> bool {
-        slot.enabled && self.length == slot.length && self.ticks == slot.ticks_per_step()
+        self.length == slot.length && self.ticks == slot.ticks_per_step()
             && self.after.iter().enumerate().all(|(i, step)| slot.step(i) == *step)
     }
 
@@ -26,92 +27,92 @@ impl PadChange {
     }
 }
 
-/// Generate only the notes and gates. Timing follows the destination's current grid.
-pub(super) fn phrase(options: &Options, bytes: &[u8], transpose: i16, slot: &Slot, seed: u64, upper: bool) -> Vec<Step> {
-    let tb = steps303(bytes);
-    let tb = &tb[..usize::from(bytes[1].clamp(1, 16))];
-    let mut out = vec![Step::default(); slot.step_count()];
-    if options.density == 0 || tb.iter().all(|note| note.rest) {
-        return out;
+/// A source keeps its own note grid and tuning even when the synth faces the rack.
+pub(super) struct Riff {
+    steps: [Step303; 16],
+    length: usize,
+    transpose: i16,
+    weight: i32,
+}
+
+impl Riff {
+    pub fn new(bytes: &[u8], transpose: i16, weight: i32) -> Self {
+        Self { steps: steps303(bytes), length: usize::from(bytes[1].clamp(1, 16)), transpose, weight }
     }
-    let pc = |n| (pitch(n) + i32::from(transpose)).rem_euclid(12) as usize;
-    let scale = options.scale.intervals();
-    let requested = (i32::from(options.root) + i32::from(transpose)).rem_euclid(12) as usize;
-    // Prefer the configured key on a tie, but follow an existing transposed or hand-written riff.
-    let root = (0..12).max_by_key(|&root| {
-        let fit: usize = tb.iter().filter(|n| !n.rest && scale.contains(&(((pc(**n) + 12 - root) % 12) as u8)))
-            .map(|n| if n.accent { 3 } else { 1 }).sum();
-        (fit, root == requested)
-    }).unwrap();
-    let mut triads = Vec::new();
-    for &degree in scale {
-        for third in [3, 4] {
-            let intervals = [degree, (degree + third) % 12, (degree + 7) % 12];
-            if intervals.iter().all(|i| scale.contains(i)) {
-                triads.push(intervals.map(|i| (root + usize::from(i)) % 12));
-            }
-        }
+
+    fn pitch_class(&self, step: Step303) -> usize {
+        (pitch(step) + i32::from(self.transpose)).rem_euclid(12) as usize
     }
-    let ticks = usize::from(slot.ticks_per_step()).max(1);
-    let mut rng = Rng(seed ^ 0x8b2a_763f_43e5_12df);
-    let mut start = 0;
-    while start < out.len() {
-        let bars = if rng.chance(options.variation.min(90)) { 2 } else { 1 };
-        let end = (start + (768 * bars / ticks).max(1)).min(out.len());
-        let mut weights = [0i32; 12];
+
+    pub fn silent(&self) -> bool {
+        self.steps[..self.length].iter().all(|s| s.rest)
+    }
+
+    fn evidence(&self, start: usize, end: usize, ticks: usize, cycle: usize, weights: &mut [i32; 12]) -> Option<usize> {
+        let period = self.length * 48;
+        let mut local = [0; 12];
         let mut first = None;
-        // Score all alignments of unequal loop lengths. An odd-length TB meets
-        // a different portion of the same pad every time the pad loops.
-        let period = tb.len() * 48;
         let mut phase = 0;
+        let mut phases = 0;
         loop {
             let from = start * ticks + phase;
             let to = end * ticks + phase;
             for beat in from / 48..to.div_ceil(48) {
-                let n = tb[beat % tb.len()];
-                if !n.rest {
-                    let offset = (beat * 48).saturating_sub(from) / ticks;
-                    first.get_or_insert((start + offset).min(end - 1));
-                    weights[pc(n)] += 1 + 3 * i32::from(n.accent) + i32::from(n.slide)
-                        + 2 * i32::from(beat % 4 == 0);
-                }
+                let n = self.steps[beat % self.length];
+                if n.rest { continue; }
+                first.get_or_insert(start + (beat * 48).saturating_sub(from) / ticks);
+                local[self.pitch_class(n)] += 1 + 3 * i32::from(n.accent) + i32::from(n.slide)
+                    + 2 * i32::from(beat % 4 == 0);
             }
-            phase = (phase + out.len() * ticks) % period;
+            phases += 1;
+            phase = (phase + cycle) % period;
             if phase == 0 { break; }
         }
+        // Unequal loop lengths need different numbers of phases; normalize before combining A and B.
+        for (total, count) in weights.iter_mut().zip(local) {
+            *total += (count * self.weight * 16 + phases / 2) / phases;
+        }
+        first
+    }
+}
+
+pub(super) fn linked_phrase(options: &Options, riffs: &[Riff], slot: &Slot, seed: u64, upper: bool) -> Vec<Step> {
+    let mut out = vec![Step::default(); slot.step_count()];
+    if options.density == 0 { return out; }
+    let mut key_fit = [0; 12];
+    for riff in riffs {
+        for note in &riff.steps[..riff.length] {
+            if !note.rest {
+                key_fit[riff.pitch_class(*note)] += riff.weight * if note.accent { 3 } else { 1 };
+            }
+        }
+    }
+    let scale = options.scale.intervals();
+    let transpose = riffs.iter().filter(|riff| !riff.silent())
+        .max_by_key(|riff| riff.weight).map_or(0, |riff| riff.transpose);
+    let requested = (i32::from(options.root) + i32::from(transpose)).rem_euclid(12) as usize;
+    let root = (0..12).max_by_key(|&root| {
+        let fit: i32 = scale.iter().map(|&degree| key_fit[(root + usize::from(degree)) % 12]).sum();
+        (fit, root == requested)
+    }).unwrap();
+    let mut harmony = super::harmony::Voicer::new(root as u8, scale, seed, upper);
+    let mut rng = Rng(seed);
+    let ticks = usize::from(slot.ticks_per_step());
+    let cycle = ticks * out.len();
+    let mut start = 0;
+    while start < out.len() {
+        let span = if cycle <= 768 && options.variation > 0 {
+            if rng.chance(options.variation) { 192 } else { 384 }
+        } else if rng.chance(options.variation.min(90)) { 1536 } else { 768 };
+        let end = (start + (span / ticks).max(1)).min(out.len());
+        let mut weights = [0; 12];
+        let first = riffs.iter().filter_map(|riff| riff.evidence(start, end, ticks, cycle, &mut weights)).min();
         if let Some(onset) = first {
-            let score = |chord: [usize; 3]| -> i32 {
-                weights.iter().enumerate().map(|(bass, &weight)| {
-                    let fit: i32 = chord.iter().map(|note| match (note + 12 - bass) % 12 {
-                        0 => 7, 3 | 4 | 5 | 7 | 8 | 9 => 2, 1 | 11 => -4, 6 => -3, _ => -1,
-                    }).sum();
-                    weight * fit
-                }).sum()
-            };
-            let triad = *triads.iter().max_by_key(|&&chord| (score(chord), rng.next())).unwrap();
-            let mut notes = [0; 4];
-            for (i, tone) in triad.into_iter().enumerate() {
-                notes[i] = (if upper { 67 } else { 55 }) + ((tone + 5) % 12) as u8;
-            }
-            notes[..3].sort_unstable();
-            if rng.chance(options.variation.min(100)) {
-                notes[0] += 12;
-                notes[..3].sort_unstable();
-            }
-            if rng.chance(options.variation / 2) {
-                for seventh in [10, 11] {
-                    let tone = (triad[0] + seventh) % 12;
-                    if scale.contains(&(((tone + 12 - root) % 12) as u8)) {
-                        let top = notes[2];
-                        notes[3] = top + ((tone + 12 - usize::from(top % 12)) % 12) as u8;
-                        break;
-                    }
-                }
-            }
-            out[onset] = Step { notes, gate_steps: (end - onset) as u16 };
+            out[onset] = Step { notes: harmony.next(&weights, options.variation), gate_steps: (end - onset) as u16 };
         }
         start = end;
     }
+    if options.variation > 0 { super::harmony::legato(&mut out); }
     out
 }
 
@@ -120,6 +121,22 @@ mod tests {
     use super::*;
     use crate::generator::{Scale, bytes303, note};
     use crate::model::Step303;
+
+    #[test]
+    fn hears_both_riffs_with_independent_tuning_and_odd_loop_lengths() {
+        let mut a = [Step303::default(); 16];
+        let mut b = a;
+        a[0] = note(0, true);
+        b[2] = note(7, true);
+        let a = Riff::new(&bytes303(&a, 7), 1, 4);
+        let b = Riff::new(&bytes303(&b, 13), -1, 1);
+        let mut weights = [0; 12];
+        for riff in [a, b] {
+            assert!(riff.evidence(0, 16, 48, 768, &mut weights).is_some());
+        }
+        assert!(weights[1] > weights[6] && weights[6] > 0);
+        assert_eq!(weights.iter().filter(|weight| **weight != 0).count(), 2);
+    }
 
     #[test]
     fn follows_the_riffs_attacks_accents_and_native_tuning_at_any_phrase_length() {
@@ -131,8 +148,9 @@ mod tests {
             let mut slot = Slot::default();
             slot.length = PhraseLength::Bars(bars);
             slot.set_step_rate(48);
-            let steps = phrase(&options, &source, 1, &slot, 901, false);
-            assert_eq!(steps, phrase(&options, &source, 1, &slot, 901, false));
+            let riffs = [Riff::new(&source, 1, 1)];
+            let steps = linked_phrase(&options, &riffs, &slot, 901, false);
+            assert_eq!(steps, linked_phrase(&options, &riffs, &slot, 901, false));
             for bar in steps.chunks_exact(16) {
                 assert_eq!(bar.iter().filter(|s| s.notes[0] != 0).count(), 1);
                 let chord = &bar[3];
@@ -151,6 +169,6 @@ mod tests {
         slot.length = PhraseLength::Steps(32);
         slot.step_ticks = 384;
         let bytes = bytes303(&[Step303::default(); 16], 13);
-        assert_eq!(phrase(&Options::default(), &bytes, 0, &slot, 7, false), vec![Step::default(); 32]);
+        assert_eq!(linked_phrase(&Options::default(), &[Riff::new(&bytes, 0, 1)], &slot, 7, false), vec![Step::default(); 32]);
     }
 }

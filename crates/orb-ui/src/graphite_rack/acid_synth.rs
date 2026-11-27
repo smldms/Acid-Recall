@@ -4,7 +4,7 @@ use super::{ACID, App, DIM, NOTES, Rack, Ui, button, egui, mix_knob};
 use orb_engine::studio::acid_presets::{EXPERIMENTAL_START, PRESETS};
 use orb_engine::studio::acid_synth::{PhraseLength, Slot};
 
-const RATES: [(u16, &str); 5] = [
+pub(super) const RATES: [(u16, &str); 5] = [
     (48, "1/16"), (96, "1/8"), (192, "1/4"), (384, "1/2"), (768, "1 bar"),
 ];
 const MACROS: [(&str, &str); 4] = [
@@ -51,6 +51,33 @@ fn step_id(row: usize) -> egui::Id {
 
 pub(super) fn apply_preset(slot: &mut Slot, index: usize) {
     slot.select_factory_preset(index);
+}
+
+/// Both editors change the same saved length, including the historical 128-bar option.
+pub(super) fn phrase_length_picker(ui: &mut Ui, slot: &mut Slot, width: f32) -> bool {
+    let initial = slot.length;
+    let mut selected = initial;
+    let count = match initial {
+        PhraseLength::Steps(n) => format!("{n} steps"),
+        PhraseLength::Bars(1) => "1 bar".into(),
+        PhraseLength::Bars(n) => format!("{n} bars"),
+    };
+    egui::ComboBox::from_id_salt("length").width(width).selected_text(count).show_ui(ui, |ui| {
+        for n in [1, 2, 4, 8, 16, 32, 64] {
+            let label = if n == 1 { "1 bar".into() } else { format!("{n} bars") };
+            ui.selectable_value(&mut selected, PhraseLength::Bars(n), label);
+        }
+        if slot.legacy_128_bars || initial == PhraseLength::Bars(128) {
+            ui.selectable_value(&mut selected, PhraseLength::Bars(128), "128 bars (legacy)");
+        }
+        ui.separator();
+        for n in [16, 32, 64, 128] {
+            ui.selectable_value(&mut selected, PhraseLength::Steps(n), format!("{n} steps"));
+        }
+    });
+    if selected == initial { return false; }
+    slot.set_length(selected);
+    true
 }
 
 impl App {
@@ -123,40 +150,12 @@ impl App {
         let chord_id = egui::Id::unique("acid-chord-editor");
         let page_id = egui::Id::unique(("acid-page", row));
         let mut page = ui.ctx().data(|d| d.get_temp::<usize>(page_id)).unwrap_or(0);
-        let count = match slot.length {
-            PhraseLength::Steps(n) => format!("{n} steps"),
-            PhraseLength::Bars(1) => "1 bar".into(),
-            PhraseLength::Bars(n) => format!("{n} bars"),
-        };
         ui.scope_builder(
             egui::UiBuilder::new().id_salt(("acid-length", row))
                 .max_rect(rack.rect(405.0, y + 8.0, 85.0, 18.0)),
             |ui| {
-                egui::ComboBox::from_id_salt("length").width(ui.available_width()).selected_text(count).show_ui(ui, |ui| {
-                    for n in [1, 2, 4, 8, 16, 32, 64] {
-                        let length = PhraseLength::Bars(n);
-                        let label = if n == 1 { "1 bar".into() } else { format!("{n} bars") };
-                        if ui.selectable_label(slot.length == length, label).clicked() && slot.length != length {
-                            slot.set_length(length);
-                            changed = true;
-                        }
-                    }
-                    if slot.legacy_128_bars || slot.length == PhraseLength::Bars(128) {
-                        let length = PhraseLength::Bars(128);
-                        if ui.selectable_label(slot.length == length, "128 bars (legacy)").clicked() && slot.length != length {
-                            slot.set_length(length);
-                            changed = true;
-                        }
-                    }
-                    ui.separator();
-                    for n in [16, 32, 64, 128] {
-                        let length = PhraseLength::Steps(n);
-                        if ui.selectable_label(slot.length == length, format!("{n} steps")).clicked() && slot.length != length {
-                            slot.set_length(length);
-                            changed = true;
-                        }
-                    }
-                });
+                let width = ui.available_width();
+                changed |= phrase_length_picker(ui, slot, width);
             },
         );
         let pages = slot.step_count().div_ceil(16);
@@ -212,13 +211,10 @@ impl App {
         let linked = self.generator.options.link_tb;
         if button(ui, rack, rack.rect(228.0, y + 9.0, 76.0, 19.0),
             (row, "acid-link"), "LINK A/B", linked)
-            .on_hover_text("Generate harmonically linked synth and TB patterns.").clicked() {
+            .on_hover_text("Link generation across both slots. RND on AcidSynth follows the TB lines; RND on a TB follows the AcidSynth chords.").clicked() {
             self.generator.options.link_tb = !linked;
         }
-        if button(ui, rack, rack.rect(313.0, y + 9.0, 72.0, 19.0),
-            (row, "acid-rnd"), "RND", false).on_hover_text("Generate a new chord sequence").clicked() {
-            self.random_pattern(row);
-        }
+        self.rack_random_button(ui, rack, row, rack.rect(313.0, y + 9.0, 72.0, 19.0));
         if changed {
             self.studio.changed();
             self.doc.modified = true;
@@ -260,6 +256,30 @@ mod tests {
                 |ui| { app.graphite_rack(ui, canvas); },
             );
             output.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn linked_random_from_either_rack_button_keeps_the_selected_phrase_grid() {
+        for length in [PhraseLength::Steps(32), PhraseLength::Bars(4)] {
+            let ctx = Context::default();
+            let mut app = App::new(Panel::new(), None);
+            app.random_pattern_with_seed(0, 31);
+            app.generator.clear_undo();
+            let slot = &mut app.studio.settings.synth_slots[1];
+            slot.enabled = true;
+            slot.set_length(length);
+            slot.set_step_rate(96);
+            app.generator.options.link_tb = true;
+            let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(WIDTH, HEIGHT));
+            let rack = Rack::fit(canvas);
+            for button in [rack.rect(313.0, ROWS[1].0 + 9.0, 72.0, 19.0),
+                           rack.rect(740.0, ROWS[0].0 + 9.0, 43.0, 19.0)] {
+                click(&ctx, &mut app, canvas, button.center());
+                assert_eq!(app.studio.settings.synth_slots[1].length, length);
+                assert_eq!(app.studio.settings.synth_slots[1].ticks_per_step(), 96);
+                assert!(app.undo_random(), "rack click must produce an undoable change");
+            }
         }
     }
 

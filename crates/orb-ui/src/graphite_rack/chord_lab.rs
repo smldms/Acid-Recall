@@ -1,6 +1,6 @@
 //! Step selection, voicing construction and manual polyphonic note entry.
 use super::{egui, App, Ui, ACID};
-use super::acid_synth::pitch_name;
+use super::acid_synth::{RATES, phrase_length_picker, pitch_name};
 
 const CHORDS: &[(&str, &[i16])] = &[
     ("Major", &[0, 4, 7]), ("Minor", &[0, 3, 7]),
@@ -112,15 +112,41 @@ impl App {
         let selected_id = egui::Id::unique(("acid-selected-step", row));
         let page_id = egui::Id::unique(("acid-page", row));
         let builder_id = egui::Id::unique(("acid-chord-builder", row));
-        let total = slot.step_count();
-        let mut index = ui.ctx().data(|d| d.get_temp::<usize>(selected_id)).unwrap_or(0).min(total - 1);
+        let mut index = ui.ctx().data(|d| d.get_temp::<usize>(selected_id)).unwrap_or(0);
         let mut builder = ui.ctx().data(|d| d.get_temp::<Builder>(builder_id)).unwrap_or_default();
         let mut changed = false;
         let mut audition = None;
         let mut open = true;
+        let mut generate_chords = false;
+        let mut generate_tbs = false;
         egui::Window::new(format!("AcidSynth {} / Chord", ["A", "B"][row]))
             .id(egui::Id::unique(("chord-window", row))).open(&mut open).vscroll(true)
             .default_width(520.0).min_width(350.0).show(ui.ctx(), |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Phrase");
+                    changed |= phrase_length_picker(ui, slot, 76.0);
+                    ui.label("Step rate");
+                    let current = slot.ticks_per_step();
+                    let rate = RATES.iter().find(|(ticks,_)| *ticks == current)
+                        .map(|&(_, label)| label.to_owned()).unwrap_or_else(|| format!("{current} ticks"));
+                    egui::ComboBox::from_id_salt("chord-step-rate").selected_text(rate).width(54.0)
+                        .show_ui(ui, |ui| {
+                            for (ticks, label) in RATES {
+                                if ui.selectable_label(current == ticks, label).clicked() && ticks != current {
+                                    slot.set_step_rate(ticks);
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
+                ui.horizontal_wrapped(|ui| {
+                    generate_chords = ui.button("Chords from TBs")
+                        .on_hover_text("Generate chords for this AcidSynth from both TB patterns. Hidden TB lines adapt to the result.").clicked();
+                    generate_tbs = ui.button("TBs from chords")
+                        .on_hover_text("Generate TB A and B from this chord phrase, including any TB hidden behind AcidSynth.").clicked();
+                });
+                let total = slot.step_count();
+                index = index.min(total - 1);
                 let pages = total.div_ceil(16);
                 let mut page = index / 16;
                 ui.horizontal(|ui| {
@@ -199,6 +225,8 @@ impl App {
             if !open { d.insert_temp(id, None::<usize>); }
         });
         if changed { self.studio.changed(); self.doc.modified = true; }
+        if generate_chords { self.linked_chords_from_tbs(row); }
+        if generate_tbs { self.linked_tbs_from_chords(row); }
         if let (Some(notes), Some(link)) = (audition, &mut self.link) {
             link.effect_command(orb_player::Command::AcidLive {
                 slot: row, event: orb_engine::studio::acid_live::Event::Audition { notes, frames: 44_100 },
@@ -210,6 +238,57 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chord_lab_generation_preserves_the_shared_steps_or_bars_and_rate() {
+        use crate::model::Panel;
+        use orb_engine::studio::acid_synth::PhraseLength;
+
+        fn frame(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) -> Vec<(String, egui::Pos2)> {
+            fn collect(shape: &egui::Shape, found: &mut Vec<(String, egui::Pos2)>) {
+                match shape {
+                    egui::Shape::Text(t) => found.push((t.galley.text().into(), t.galley.rect.translate(t.pos.to_vec2()).center())),
+                    egui::Shape::Vec(v) => { for s in v { collect(s, found); } }
+                    _ => {}
+                }
+            }
+            let mut out = ctx.run_ui(egui::RawInput {
+                events, screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 850.0))),
+                ..Default::default()
+            }, |ui| app.acid_chord_editor(ui, 1, egui::Id::unique("acid-chord-editor")));
+            let mut found = Vec::new();
+            for clipped in &out.shapes { collect(&clipped.shape, &mut found); }
+            out.textures_delta.clear();
+            found
+        }
+        for (length, display) in [(PhraseLength::Steps(32), "32 steps"), (PhraseLength::Bars(4), "4 bars")] {
+            let ctx = egui::Context::default();
+            let mut app = App::new(Panel::new(), None);
+            app.random_pattern_with_seed(0, 31);
+            app.generator.clear_undo();
+            let slot = &mut app.studio.settings.synth_slots[1];
+            slot.enabled = true;
+            slot.set_length(length);
+            slot.set_step_rate(96);
+            app.generator.options.link_tb = false;
+            frame(&ctx, &mut app, vec![]);
+            for action in ["Chords from TBs", "TBs from chords"] {
+                let labels = frame(&ctx, &mut app, vec![]);
+                assert!(labels.iter().any(|(s,_)| s == display));
+                assert!(labels.iter().any(|(s,_)| s == "1/8"));
+                let pos = labels.iter().find(|(s,_)| s == action).unwrap().1;
+                frame(&ctx, &mut app, vec![egui::Event::PointerMoved(pos)]);
+                for pressed in [true,false] {
+                    frame(&ctx, &mut app, vec![egui::Event::PointerButton {
+                        pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default(),
+                    }]);
+                }
+                let slot = &app.studio.settings.synth_slots[1];
+                assert_eq!((slot.length, slot.ticks_per_step()), (length, 96));
+                assert!(app.undo_random(), "{action} must work with LINK off");
+            }
+        }
+    }
 
     #[test]
     fn inversions_preserve_pitch_classes_and_ascending_order() {

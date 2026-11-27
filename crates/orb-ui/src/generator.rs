@@ -2,6 +2,7 @@
 //! Seeded generators are deterministic so musical constraints can be checked without audio I/O.
 
 mod acid;
+mod harmony;
 mod rhythms;
 mod ui;
 

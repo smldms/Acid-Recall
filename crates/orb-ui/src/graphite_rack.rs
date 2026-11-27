@@ -493,18 +493,7 @@ impl App {
                 } else {
                     self.rack_tr(ui, rack, row, y);
                 }
-                if button(
-                    ui,
-                    rack,
-                    rack.rect(740.0, y + 9.0, 43.0, 19.0),
-                    (row, "random"),
-                    "RND",
-                    false,
-                )
-                .clicked()
-                {
-                    self.random_pattern(row);
-                }
+                self.rack_random_button(ui, rack, row, rack.rect(740.0, y + 9.0, 43.0, 19.0));
                 if button(
                     ui,
                     rack,
@@ -540,7 +529,7 @@ impl App {
                         "LINK A/B",
                         self.generator.options.link_tb,
                     )
-                    .on_hover_text("Generate harmonically linked patterns across the two instrument slots.")
+                    .on_hover_text("Link both slots. In a mixed rack, RND on a TB follows AcidSynth chords; RND on AcidSynth follows the TB lines.")
                     .clicked()
                     {
                         self.generator.options.link_tb = !self.generator.options.link_tb;
@@ -562,6 +551,39 @@ impl App {
             rack.rect(14.0, 962.0, 1030.0, 320.0),
             rack.rect(1058.0, 84.0, 208.0, 1202.0),
         )
+    }
+
+    fn rack_random_button(&mut self, ui: &mut Ui, rack: Rack, row: usize, rect: Rect) {
+        let slots = &self.studio.settings.synth_slots;
+        let linked = row < 2 && self.generator.options.link_tb;
+        let (label, tip) = if row >= 2 {
+            ("RND", "Generate a drum pattern.")
+        } else if slots[row].enabled && linked {
+            ("RND CHORDS", "Build chords from TB A and B. Visible TB lines stay as played. Hidden TB lines follow the new chords.")
+        } else if slots[row].enabled {
+            ("RND CHORDS", "Generate chords for this AcidSynth. Enable LINK A/B to follow the TB lines.")
+        } else if linked && slots[1-row].enabled {
+            ("RND TBs", "Generate TB A and B from the current AcidSynth chords.")
+        } else if linked {
+            ("RND TBs", "Generate a linked pair of TB patterns.")
+        } else {
+            ("RND", "Generate a pattern for this TB. Enable LINK A/B for linked generation.")
+        };
+        let response = button(ui, rack, rect, (row, "random"), label, false)
+            .on_hover_text(format!("{tip} Right-click for generator settings and undo."));
+        if response.clicked() {
+            self.random_pattern(row);
+        }
+        response.context_menu(|ui| {
+            if ui.button("Generator settings…").clicked() {
+                self.generator.open = true;
+                ui.close();
+            }
+            if ui.add_enabled(self.can_undo_random(), egui::Button::new("Undo Random")).clicked() {
+                self.undo_random();
+                ui.close();
+            }
+        });
     }
 
     fn rack_transport(&mut self, ui: &mut Ui, rack: Rack) {

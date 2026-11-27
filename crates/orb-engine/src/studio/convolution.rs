@@ -72,16 +72,21 @@ struct Channel {
     input: [f64; 2048],
     delayed: [f64; 2048],
     position: usize,
+    initial_padding: usize,
 }
 
 impl Channel {
-    fn new(ir: &[f64]) -> Self {
+    fn new(ir: &[f64], phase: usize) -> Self {
+        let initial_padding = if ir.len() > 2048 { phase } else { 0 };
         Self {
             head: Partitions::new(&ir[..ir.len().min(2048)], 64),
             tail: (ir.len() > 2048).then(|| Partitions::new(&ir[2048..], 2048)),
             input: [0.0; 2048],
             delayed: [0.0; 2048],
-            position: 0,
+            // The first tail input hop is prefixed with silence. Its output is read
+            // on the next hop as usual, so tap 2048 still arrives at frame 2048.
+            position: initial_padding,
+            initial_padding,
         }
     }
 
@@ -96,6 +101,11 @@ impl Channel {
             self.position = 0;
             if let Some(tail) = &mut self.tail {
                 tail.process(&self.input, &mut self.delayed);
+                if self.initial_padding > 0 {
+                    // FFT roundoff must not leak energy before the first possible tail tap.
+                    self.delayed[..self.initial_padding].fill(0.0);
+                    self.initial_padding = 0;
+                }
             }
         }
     }
@@ -115,7 +125,8 @@ impl Convolver {
         }
         Ok(Self {
             channels: std::array::from_fn(|c| {
-                Channel::new(&ir.iter().map(|x| f64::from(x[c])).collect::<Vec<_>>())
+                // The expensive stereo tail jobs occupy different 64-frame callbacks.
+                Channel::new(&ir.iter().map(|x| f64::from(x[c])).collect::<Vec<_>>(), c * 1024)
             }),
         })
     }
@@ -175,6 +186,59 @@ pub fn synthetic(preset: usize, seconds: f64) -> Vec<[f32; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stereo_tail_jobs_alternate_and_match_an_unstaggered_fir_after_replacement() {
+        let ir = synthetic(1, 0.23);
+        let mut convolver = Convolver::new(&ir).unwrap();
+        let mut reference = Channel::new(&ir.iter().map(|x| f64::from(x[1])).collect::<Vec<_>>(), 0);
+        let mut seed = 123456789_u32;
+        for i in 0..409 {
+            if i == 173 {
+                // Replacing an IR constructs a fresh convolver at a non-hop-aligned callback.
+                convolver = Convolver::new(&ir).unwrap();
+                reference = Channel::new(&ir.iter().map(|x| f64::from(x[1])).collect::<Vec<_>>(), 0);
+            }
+            let input = std::array::from_fn(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (f64::from(seed) / f64::from(u32::MAX) - 0.5) * 0.4
+            });
+            let left_due = convolver.channels[0].position + 64 == 2048;
+            let right_due = convolver.channels[1].position + 64 == 2048;
+            assert!(!(left_due && right_due));
+            let elapsed = if i < 173 { i } else { i - 173 };
+            assert_eq!(right_due, elapsed % 32 == 15);
+            assert_eq!(left_due, elapsed % 32 == 31);
+            let mut expected = [0.0; 64];
+            let mut output = [[0.0; 64]; 2];
+            reference.process(&input, &mut expected);
+            convolver.process(&[input; 2], &mut output);
+            for (actual, expected) in output[1].iter().zip(expected) {
+                assert!((actual - expected).abs() < 1e-11);
+            }
+        }
+    }
+
+    #[test]
+    fn isolated_tail_impulse_has_no_early_energy_or_stereo_delay() {
+        let mut ir = vec![[0.0; 2]; 2049];
+        ir[2048] = [0.5, -0.25];
+        let mut convolver = Convolver::new(&ir).unwrap();
+        for block in 0..66 {
+            let mut input = [[0.0; 64]; 2];
+            if block == 0 { input[0][0] = 1.0; input[1][0] = 1.0; }
+            let mut out = [[0.0; 64]; 2];
+            convolver.process(&input, &mut out);
+            for (side, channel) in out.iter().enumerate() {
+                for (j, &value) in channel.iter().enumerate() {
+                    let frame = block * 64 + j;
+                    if frame < 2048 { assert_eq!(value, 0.0); }
+                    let target = if frame == 2048 { f64::from(ir[2048][side]) } else { 0.0 };
+                    assert!((value - target).abs() < 1e-12);
+                }
+            }
+        }
+    }
 
     #[test]
     fn partition_boundaries_match_direct_stereo_fir_without_latency() {

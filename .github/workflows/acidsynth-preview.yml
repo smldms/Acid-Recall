@@ -21,6 +21,9 @@ jobs:
         with:
           ref: 7a99622a0925497d38aa7780e25296c1a55c0a45
           path: alpha3
+      - name: Prepare ASIO and LLVM for both builds
+        shell: pwsh
+        run: . ./scripts/setup-asio.ps1
       - name: Compare alpha 3 and current synth on the same Windows runner
         shell: pwsh
         run: |
@@ -57,9 +60,6 @@ jobs:
           if (Test-Path assets/demos/Low-Orbit.recall) { Copy-Item assets/demos/Low-Orbit.recall "$out/Low-Orbit.recall" }
           Copy-Item LICENSE "$out/LICENSE"
           Copy-Item docs/LICENSE-SYMPHONIA.txt "$out/LICENSE-SYMPHONIA.txt"
-          Copy-Item .build-tools/asio/sdk/ASIOSDK/LICENSE.txt "$out/LICENSE-ASIO-SDK.txt"
-          New-Item -ItemType Directory -Path "$out/sources"
-          Copy-Item .build-tools/asio/ASIO-SDK_2.3.4_2025-10-15.zip "$out/sources/"
           "V2 AcidSynth preview - ${{ github.sha }}" | Set-Content "$out/VERSION"
       - name: Render five factory patches with the native sound engine
         run: cargo run --locked --release -p orb-engine --example soundcheck -- acidsynth-preview/AcidSynth-Soundcheck.wav

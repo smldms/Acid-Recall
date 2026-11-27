@@ -11,6 +11,15 @@ const TABLE: usize = 512;
 const LEVELS: usize = 7;
 pub(super) const VOICES: usize = 12;
 
+/// One LFO cycle in native sequencer ticks (192 per quarter). Dotted/triplet values stay exact.
+pub const LFO_DIVISIONS: &[(&str, u16)] = &[
+    ("16 bars", 12288), ("8 bars", 6144), ("4 bars", 3072), ("2 bars", 1536),
+    ("1 bar", 768), ("1/2 dotted", 576), ("1/2", 384), ("1/4 dotted", 288),
+    ("1/2 triplet", 256), ("1/4", 192), ("1/8 dotted", 144), ("1/4 triplet", 128),
+    ("1/8", 96), ("1/16 dotted", 72), ("1/8 triplet", 64), ("1/16", 48),
+    ("1/32 dotted", 36), ("1/16 triplet", 32), ("1/32", 24), ("1/32 triplet", 16),
+];
+
 /// One bipolar patch cable. Source zero disconnects the cable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -36,6 +45,9 @@ pub struct Patch {
     pub cutoff: f32,
     pub resonance: f32,
     pub lfo_rate: f32,
+    /// 0 = free Hz, 1 = one cycle per selected musical division.
+    pub lfo_sync: u8,
+    pub lfo_division: u8,
     pub lfo_depth: f32,
     pub decay: f32,
     pub sustain: f32,
@@ -65,11 +77,19 @@ pub struct Patch {
 }
 
 impl Patch {
+    pub fn lfo_hz(&self) -> f32 {
+        0.04 + 6.0 * self.lfo_rate.powi(2)
+    }
+
+    pub fn lfo_period(&self) -> (&'static str, u16) {
+        LFO_DIVISIONS[usize::from(self.lfo_division).min(LFO_DIVISIONS.len() - 1)]
+    }
+
     /// Defaults for old projects, leaving the additional stages bypassed.
     pub const INIT: Self = Self {
         wave_a: 0.0, wave_b: 0.5, detune: 0.0, mix: 0.5,
         attack: 0.05, release: 0.25, cutoff: 0.75, resonance: 0.0,
-        lfo_rate: 0.25, lfo_depth: 0.0, decay: 0.0, sustain: 1.0,
+        lfo_rate: 0.25, lfo_sync: 0, lfo_division: 9, lfo_depth: 0.0, decay: 0.0, sustain: 1.0,
         filter_env: 0.0, sub: 0.0, drive: 0.0, chorus: 0.0,
         fm_algorithm: 0, fm_ratios: [2.0, 3.0, 4.0],
         fm_index: 0.45, fm_feedback: 0.1, fold: 0.42, sync: 0.45,
@@ -122,9 +142,17 @@ impl PhraseLength {
 #[serde(default)]
 pub struct Slot {
     pub enabled: bool,
+    /// Missing in projects where choosing AcidSynth replaced the native TB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tb_enabled: Option<bool>,
+    /// Which panel is visible. Editing a muted instrument does not enable it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_synth: Option<bool>,
     /// While off, this slot responds only to live MIDI and audition events.
     pub sequence_enabled: bool,
     pub preset: u8,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub user_preset: String,
     pub patch: Patch,
     pub macros: [f32; 4],
     pub steps: [Step; 16],
@@ -146,7 +174,8 @@ impl Default for Slot {
         steps[0] = Step { notes: [50, 57, 60, 65], gate_steps: 8 };
         steps[8] = Step { notes: [46, 53, 57, 62], gate_steps: 8 };
         Self {
-            enabled: false, sequence_enabled: true, preset: 0, patch: super::acid_presets::PRESETS[0].1,
+            enabled: false, tb_enabled: None, edit_synth: None, sequence_enabled: true,
+            preset: 0, user_preset: String::new(), patch: super::acid_presets::PRESETS[0].1,
             macros: [0.5, 0.35, 0.45, 0.25], steps, step_ticks: 192,
             length: PhraseLength::default(), legacy_bar_ticks: None, legacy_128_bars: false,
             tail: Vec::new(),
@@ -155,6 +184,16 @@ impl Default for Slot {
 }
 
 impl Slot {
+    pub fn tb_active(&self) -> bool { self.tb_enabled.unwrap_or(!self.enabled) }
+
+    pub fn editing_synth(&self) -> bool { self.edit_synth.unwrap_or(self.enabled) }
+
+    pub fn set_synth_active(&mut self, enabled: bool) {
+        self.tb_enabled = Some(self.tb_active());
+        self.edit_synth = Some(self.editing_synth());
+        self.enabled = enabled;
+    }
+
     pub fn step_count(&self) -> usize {
         match self.length.valid() {
             PhraseLength::Steps(n) => usize::from(n),
@@ -256,6 +295,8 @@ impl Slot {
         p.sync = unit(p.sync);
         p.filter_mode = p.filter_mode.min(3);
         p.lfo_target = p.lfo_target.min(3);
+        p.lfo_sync = p.lfo_sync.min(1);
+        p.lfo_division = p.lfo_division.min((LFO_DIVISIONS.len() - 1) as u8);
         p.lfo_shape = p.lfo_shape.min(3);
     }
 }
@@ -270,6 +311,8 @@ pub(super) struct Bank {
 struct Shape {
     index: usize,
     blend: f32,
+    tb_gain: f32,
+    pub(super) dry: Block,
 }
 
 impl Shape {
@@ -401,6 +444,7 @@ impl Default for Instrument {
         Self {
             live: super::acid_live::Queue::default(),
             voices: [Voice::default(); VOICES], last_step: None, last_tick: None, blend: 0.0,
+            tb_gain: 1.0, dry: [0.0; crate::frame::BLOCK],
             lfo: 0.0, low: 0.0, band: 0.0, chorus_line: [0.0; 1024], chorus_index: 0, chorus_phase: 0.0, history: [0.0; 512], write: 0,
         }
     }
@@ -496,9 +540,20 @@ impl Instrument {
     }
 
     /// Return before touching the legacy bus whenever AcidSynth is fully bypassed.
-    pub fn render(&mut self, bank: &Bank, slot: &Slot, bus: &mut Block, tick: f64, advance: f64, play: bool) {
-        if !slot.enabled && self.blend <= 0.0 { return; }
-        let play = play && slot.sequence_enabled;
+    pub fn render(&mut self, bank: &Bank, slot: &Slot, bus: &mut Block, tick: f64, advance: f64, transport_playing: bool) {
+        let tb_target = if slot.tb_active() { 1.0 } else { 0.0 };
+        if !slot.enabled && self.blend <= 0.0 {
+            if self.tb_gain == tb_target {
+                if tb_target == 0.0 { bus.fill(0.0); }
+            } else {
+                for sample in bus {
+                    self.tb_gain += (tb_target - self.tb_gain).clamp(-1.0/256.0, 1.0/256.0);
+                    *sample *= self.tb_gain;
+                }
+            }
+            return;
+        }
+        let play = transport_playing && slot.sequence_enabled;
         if !play || !slot.enabled {
             for v in &mut self.voices {
                 if !slot.enabled || v.live_key.is_none() { v.end_tick = f64::NEG_INFINITY; }
@@ -513,7 +568,20 @@ impl Instrument {
         }
         let p = slot.patch;
         let [timbre, motion, width, _] = slot.macros;
-        let lfo_speed = (0.04 + 6.0 * p.lfo_rate.powi(2)) / RATE;
+        let next_lfo = if p.lfo_sync == 0 {
+            (self.lfo + (p.lfo_hz() / RATE) * bus.len() as f32).fract()
+        } else {
+            let period = f64::from(p.lfo_period().1);
+            let elapsed_ticks = advance * bus.len() as f64;
+            if transport_playing {
+                // Recover phase directly from the transport after seeks, loops and tempo changes.
+                self.lfo = (tick.rem_euclid(period) / period) as f32;
+                ((tick + elapsed_ticks).rem_euclid(period) / period) as f32
+            } else {
+                // The transport is parked but live keys still modulate at the project tempo.
+                (f64::from(self.lfo) + elapsed_ticks / period).fract() as f32
+            }
+        };
         let waveform = match p.lfo_shape {
             1 => 1.0 - 4.0 * (self.lfo - 0.5).abs(),
             2 => 2.0 * self.lfo - 1.0,
@@ -657,11 +725,20 @@ impl Instrument {
             }
             self.chorus_index = (self.chorus_index + 1) & 1023;
             self.chorus_phase = (self.chorus_phase + 0.38 / RATE).fract();
-            *sample += (out - *sample) * self.blend;
+            if slot.tb_enabled.is_none() {
+                *sample += (out - *sample) * self.blend;
+                self.tb_gain = 1.0 - self.blend;
+            } else {
+                self.tb_gain += (tb_target - self.tb_gain).clamp(-1.0/256.0, 1.0/256.0);
+                self.dry[i] = out * self.blend;
+                *sample = *sample * self.tb_gain + self.dry[i];
+            }
         }
         if play && slot.enabled { self.last_tick = Some(tick + bus.len() as f64 * advance); }
-        self.lfo = (self.lfo + lfo_speed * bus.len() as f32).fract();
-        if !slot.enabled && self.blend == 0.0 { *self = Self::default(); }
+        self.lfo = next_lfo;
+        if !slot.enabled && self.blend == 0.0 {
+            *self = Self { tb_gain: self.tb_gain, ..Self::default() };
+        }
     }
 
     /// A delayed difference leaves the mid (mono sum) intact, after the channel inserts.
@@ -681,6 +758,53 @@ impl Instrument {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tempo_lfo_tracks_transport_across_rate_changes_seeks_and_keys_only_mode() {
+        let bank = Bank::new();
+        let mut synth = Instrument::default();
+        let mut slot = Slot { enabled: true, sequence_enabled: false, ..Slot::default() };
+        slot.patch.lfo_sync = 1;
+        let mut block = [0.0; 64];
+        for (division, &(_, period_ticks)) in LFO_DIVISIONS.iter().enumerate() {
+            slot.patch.lfo_division = division as u8;
+            let period = f64::from(period_ticks);
+            for (tick, bpm) in [(period * 2.25, 90.0), (period * 0.125, 165.0)] {
+                let advance = bpm * 192.0 / (60.0 * 44100.0);
+                synth.render(&bank, &slot, &mut block, tick, advance, true);
+                let expected = ((tick + advance * 64.0).rem_euclid(period) / period) as f32;
+                assert_eq!(synth.lfo, expected);
+            }
+            // Stopped keys follow that same tempo even though the transport tick stays parked.
+            let before = synth.lfo;
+            synth.render(&bank, &slot, &mut block, 0.0, 0.01, false);
+            assert_eq!(synth.lfo, (f64::from(before) + 64.0 * 0.01 / period).fract() as f32);
+        }
+        assert!(LFO_DIVISIONS.contains(&("1/8 triplet", 64)));
+        assert!(LFO_DIVISIONS.contains(&("1/8 dotted", 144)));
+    }
+
+    #[test]
+    fn old_patch_keeps_free_rate_and_synced_patch_round_trips() {
+        let old: Patch = serde_json::from_str(r#"{"lfo_rate":0.625,"lfo_depth":0.75}"#).unwrap();
+        assert_eq!(old.lfo_sync, 0);
+        assert_eq!(old.lfo_period(), ("1/4", 192));
+        let bank = Bank::new();
+        let mut synth = Instrument::default();
+        let mut slot = Slot { enabled: true, patch: old, ..Slot::default() };
+        let mut block = [0.0; 64];
+        let mut reference = 0.0_f32;
+        for (tick, advance) in [(0.0, 0.01), (64.0, 0.02), (0.0, 0.02)] {
+            synth.render(&bank, &slot, &mut block, tick, advance, true);
+            reference = (reference + (0.04 + 6.0 * old.lfo_rate.powi(2)) / RATE * 64.0).fract();
+            assert_eq!(synth.lfo, reference);
+        }
+        slot.patch.lfo_sync = 1;
+        slot.patch.lfo_division = 14;
+        let encoded = serde_json::to_string(&slot.patch).unwrap();
+        assert_eq!(serde_json::from_str::<Patch>(&encoded).unwrap(), slot.patch);
+        assert_eq!(slot.patch.lfo_period(), ("1/8 triplet", 64));
+    }
 
     #[test]
     fn live_keys_are_polyphonic_velocity_sensitive_and_release_while_stopped() {

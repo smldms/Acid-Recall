@@ -757,6 +757,13 @@ impl App {
         let mut changed = false;
         for action in context::take(ctx) {
             match action {
+                context::Action::MainPanel(id, add) => {
+                    if let Some((row, field)) = crate::studio::midi::acid::target(&id)
+                        && self.studio.main_panel.update(row, field, add) {
+                        self.studio.changed();
+                        self.doc.modified = true;
+                    }
+                }
                 context::Action::Learn(id) => {
                     self.midi.filter.clear();
                     self.midi.selected = id;
@@ -791,6 +798,7 @@ impl App {
             self.save_midi();
         }
         context::snapshot(ctx, &self.settings.midi);
+        context::panel_snapshot(ctx, &self.studio.main_panel);
         if let Some(id) = self.midi.learning.clone() {
             egui::Window::new("MIDI Learn")
                 .id(egui::Id::unique("midi-learn-status"))

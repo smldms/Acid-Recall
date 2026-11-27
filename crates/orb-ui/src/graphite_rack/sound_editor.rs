@@ -2,9 +2,10 @@
 use super::acid_synth::apply_preset;
 use super::{ACID, App, BORDER, DIM, INK, Ui, egui};
 use crate::midi::MidiMenu;
+use crate::user_bank::{Sound, UserBank};
 use egui::{Color32, Frame, Margin, Pos2, RichText, Sense, Stroke, Vec2};
 use orb_engine::studio::acid_presets::{EXPERIMENTAL_START, PRESETS};
-use orb_engine::studio::acid_synth::{Patch, Slot};
+use orb_engine::studio::acid_synth::{LFO_DIVISIONS, Patch, Slot};
 use std::f32::consts::{PI, TAU};
 
 const PANEL: Color32 = Color32::from_rgb(28, 31, 32);
@@ -242,8 +243,9 @@ fn filter_graph(ui: &mut Ui, p: &Patch) {
 }
 
 fn lfo_graph(ui: &mut Ui, p: &Patch) {
+    let cycles = if p.lfo_sync != 0 { 768.0 / f32::from(p.lfo_period().1) } else { p.lfo_hz() };
     graph(ui, LILAC, |x| {
-        let phase = (x * (1.0 + p.lfo_rate * 4.0)).fract();
+        let phase = (x * cycles).fract();
         let v = match p.lfo_shape {
             1 => 1.0 - 4.0*(phase-0.5).abs(),
             2 => 2.0*phase - 1.0,
@@ -304,7 +306,8 @@ fn preset_browser_id(row: usize) -> egui::Id {
 }
 
 /// An in-flow list keeps left-click browsing independent of the viewport's MIDI context popup.
-fn preset_browser(ui: &mut Ui, row: usize, slot: &mut Slot) {
+fn preset_browser(ui: &mut Ui, row: usize, slot: &mut Slot, bank: &mut UserBank) {
+    let mut recalled = false;
     let mut selected = None;
     let preset_id = target(row, "preset");
     Frame::new().fill(PANEL).inner_margin(Margin::same(8)).corner_radius(4.0).show(ui, |ui| {
@@ -317,7 +320,7 @@ fn preset_browser(ui: &mut Ui, row: usize, slot: &mut Slot) {
                 egui::ScrollArea::vertical().id_salt(("preset-bank", row, start))
                     .max_height(165.0).show(column, |ui| {
                         for (i, (name, _)) in PRESETS.iter().enumerate().take(end).skip(start) {
-                            if ui.selectable_label(usize::from(slot.preset) == i, *name)
+                            if ui.selectable_label(slot.user_preset.is_empty() && usize::from(slot.preset) == i, *name)
                                 .midi_menu(ui, &preset_id).clicked() {
                                 selected = Some(i);
                             }
@@ -325,29 +328,67 @@ fn preset_browser(ui: &mut Ui, row: usize, slot: &mut Slot) {
                     });
             }
         });
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.strong("USER");
+            if ui.small_button("Refresh").clicked() { bank.refresh(); }
+        });
+        egui::ScrollArea::vertical().id_salt(("user-bank", row)).max_height(104.0).show(ui, |ui| {
+            if bank.entries.is_empty() { ui.label("No saved sounds"); }
+            for e in &bank.entries {
+                if ui.selectable_label(slot.user_preset == e.name, e.name.as_str()).clicked() {
+                    e.sound.recall(slot, &e.name);
+                    bank.names[row] = e.name.clone();
+                    bank.confirm[row] = None;
+                    recalled = true;
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.add(egui::TextEdit::singleline(&mut bank.names[row]).hint_text("Sound name").char_limit(64)).changed() {
+                bank.confirm[row] = None;
+            }
+            if ui.button("Save to USER").clicked() { bank.save(row, slot, false); }
+        });
+        if let Some(old) = &bank.confirm[row] {
+            let prompt = format!("Replace {}?", old.name);
+            ui.horizontal(|ui| {
+                ui.label(prompt);
+                if ui.button("Replace").clicked() { bank.save(row, slot, true); }
+                if ui.button("Cancel").clicked() { bank.confirm[row] = None; }
+            });
+        }
+        if let Some(error) = &bank.error { ui.colored_label(OCHRE, error.as_str()); }
     });
     if let Some(index) = selected {
         apply_preset(slot, index);
     }
-    if selected.is_some() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+    if recalled || selected.is_some() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         ui.ctx().data_mut(|d| d.insert_temp(preset_browser_id(row), false));
     }
 }
 
-fn patch_panel(ui: &mut Ui, slot: &mut Slot, row: usize) -> (bool, bool) {
+fn patch_panel(ui: &mut Ui, slot: &mut Slot, row: usize, bank: &mut UserBank) -> (bool, bool) {
     let mut audition = false;
     let before = slot.patch;
     let initial_macros = slot.macros;
     let initial_preset = slot.preset;
+    let initial_name = slot.user_preset.clone();
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("AcidSynth").size(25.0).strong().color(INK));
         ui.label(RichText::new(["A", "B"][row]).monospace().color(TEAL));
         ui.add_space(12.0);
         let current = usize::from(slot.preset).min(PRESETS.len()-1);
-        let suffix = if PRESETS[current].1 == slot.patch { "" } else { " *" };
+        let (label, edited) = if slot.user_preset.is_empty() {
+            (PRESETS[current].0, PRESETS[current].1 != slot.patch)
+        } else {
+            let saved = bank.entries.iter().find(|e| e.name == slot.user_preset);
+            (slot.user_preset.as_str(), saved.is_none_or(|e| e.sound != Sound::capture(slot)))
+        };
+        let suffix = if edited { " *" } else { "" };
         let preset_id = target(row, "preset");
         let picker_open = ui.ctx().data(|d| d.get_temp::<bool>(preset_browser_id(row))).unwrap_or(false);
-        let preset_button = ui.add_sized([195.0, 24.0], egui::Button::new(format!("{}{suffix}", PRESETS[current].0))
+        let preset_button = ui.add_sized([195.0, 24.0], egui::Button::new(format!("{label}{suffix}"))
             .selected(picker_open)).midi_menu(ui, &preset_id).on_hover_text("Choose a preset");
         if preset_button.clicked() {
             ui.ctx().data_mut(|d| d.insert_temp(preset_browser_id(row), !picker_open));
@@ -356,7 +397,7 @@ fn patch_panel(ui: &mut Ui, slot: &mut Slot, row: usize) -> (bool, bool) {
             .on_hover_text("Play the selected chord for three seconds.").clicked();
     });
     if ui.ctx().data(|d| d.get_temp::<bool>(preset_browser_id(row))).unwrap_or(false) {
-        preset_browser(ui, row, slot);
+        preset_browser(ui, row, slot, bank);
     }
     ui.add_space(5.0);
     let p = &mut slot.patch;
@@ -417,7 +458,25 @@ fn patch_panel(ui: &mut Ui, slot: &mut Slot, row: usize) -> (bool, bool) {
             lfo_graph(ui, p);
             modes(ui, "WAVE", &target(row, "lfo_shape"), &mut p.lfo_shape, &["Sine", "Tri", "Ramp", "Square"]);
             modes(ui, "TO", &target(row, "lfo_target"), &mut p.lfo_target, &["Colour", "Filter", "Pitch", "Mix"]);
-            dials(ui, row, &mut [("lfo_rate", "Rate", &mut p.lfo_rate), ("lfo_depth", "Depth", &mut p.lfo_depth)], LILAC);
+            modes(ui, "CLOCK", &target(row, "lfo_sync"), &mut p.lfo_sync, &["Free", "Sync"]);
+            ui.columns(2, |cols| {
+                if p.lfo_sync == 0 {
+                    let label = format!("Rate · {:.2} Hz", p.lfo_hz());
+                    dial(&mut cols[0], &label, &mut p.lfo_rate, LILAC, &target(row, "lfo_rate"));
+                } else {
+                    let midi = target(row, "lfo_division");
+                    let ui = &mut cols[0];
+                    midi_label(ui, RichText::new("Division").size(11.0).color(INK), &midi);
+                    egui::ComboBox::from_id_salt(("lfo-division", row))
+                        .selected_text(p.lfo_period().0)
+                        .show_ui(ui, |ui| {
+                            for (index, &(name, _)) in LFO_DIVISIONS.iter().enumerate() {
+                                ui.selectable_value(&mut p.lfo_division, index as u8, name);
+                            }
+                        }).response.midi_menu(ui, &midi);
+                }
+                dial(&mut cols[1], "Depth", &mut p.lfo_depth, LILAC, &target(row, "lfo_depth"));
+            });
         });
     });
     ui.add_space(4.0);
@@ -435,7 +494,7 @@ fn patch_panel(ui: &mut Ui, slot: &mut Slot, row: usize) -> (bool, bool) {
         });
     });
     matrix(ui, row, &mut slot.patch);
-    (before != slot.patch || initial_macros != slot.macros || initial_preset != slot.preset, audition)
+    (before != slot.patch || initial_macros != slot.macros || initial_preset != slot.preset || initial_name != slot.user_preset, audition)
 }
 
 impl App {
@@ -443,13 +502,14 @@ impl App {
         let mut open = true;
         let mut changed = false;
         let mut audition = false;
+        self.user_bank.configure(self.settings.file.as_deref());
         let slot = &mut self.studio.settings.synth_slots[row];
         egui::Window::new(format!("AcidSynth {} / Sound editor", ["A","B"][row]))
             .open(&mut open).default_width(690.0).default_height(700.0).min_width(540.0).vscroll(true)
             .show(ui.ctx(), |ui| {
                 ui.visuals_mut().selection.bg_fill = Color32::from_rgb(56, 74, 71);
                 ui.visuals_mut().selection.stroke = Stroke::new(1.0, TEAL);
-                (changed, audition) = patch_panel(ui, slot, row);
+                (changed, audition) = patch_panel(ui, slot, row, &mut self.user_bank);
             });
         if audition {
             self.audition_acid_patch(row);
@@ -489,7 +549,7 @@ mod tests {
                 events,
                 ..Default::default()
             },
-            |ui| { interaction = patch_panel(ui, slot, 1); },
+            |ui| { interaction = patch_panel(ui, slot, 1, &mut UserBank::default()); },
         );
         let mut labels = Vec::new();
         for clipped in &output.shapes { text_shapes(&clipped.shape, &mut labels); }
@@ -535,6 +595,25 @@ mod tests {
     }
 
     #[test]
+    fn lfo_clock_toggles_between_saved_free_rate_and_musical_division() {
+        let ctx = egui::Context::default();
+        let mut slot = Slot::default();
+        let rate = slot.patch.lfo_rate;
+        panel_frame(&ctx, &mut slot, vec![]);
+        let labels = panel_frame(&ctx, &mut slot, vec![]).0;
+        click(&ctx, &mut slot, position(&labels, "Sync"));
+        assert_eq!(slot.patch.lfo_sync, 1);
+        let labels = panel_frame(&ctx, &mut slot, vec![]).0;
+        assert!(labels.iter().any(|(s,_)| s == "1/4"));
+        assert!(!labels.iter().any(|(s,_)| s.ends_with(" Hz")));
+        click(&ctx, &mut slot, position(&labels, "Free"));
+        assert_eq!(slot.patch.lfo_sync, 0);
+        assert_eq!(slot.patch.lfo_rate, rate);
+        let labels = panel_frame(&ctx, &mut slot, vec![]).0;
+        assert!(labels.iter().any(|(s,_)| s.ends_with(" Hz")));
+    }
+
+    #[test]
     fn choosing_connections_and_dragging_depth_keeps_the_matrix_expanded() {
         let ctx = egui::Context::default();
         let mut slot = Slot::default();
@@ -569,6 +648,37 @@ mod tests {
         let labels = panel_frame(&ctx, &mut slot, vec![]).0;
         assert!(labels.iter().any(|(s,_)| s.contains("Modulation matrix") && s.contains("1 / 4")));
         assert!(labels.iter().any(|(s,_)| s == "FROM 4"));
+    }
+
+    #[test]
+    fn edit_sound_pin_and_remove_share_the_midi_menu_and_keep_the_patch_intact() {
+        use crate::model::Panel;
+        let ctx = egui::Context::default();
+        let mut app = App::new(Panel::new(), None);
+        app.settings.midi.enabled = false;
+        let mut slot = Slot::default();
+        let initial = slot.clone();
+        let (_, cutoff) = crate::studio::midi::acid::target("acidsynth2.cutoff").unwrap();
+        for (menu, expected) in [("Add to Main Panel", true), ("Remove from Main Panel", false)] {
+            frame(&ctx, &mut slot, vec![]);
+            let labels = frame(&ctx, &mut slot, vec![]);
+            let pos = position(&labels, "Cutoff") - Vec2::new(0.0, 25.0);
+            frame(&ctx, &mut slot, vec![egui::Event::PointerMoved(pos)]);
+            for pressed in [true, false] {
+                frame(&ctx, &mut slot, vec![egui::Event::PointerButton {
+                    pos, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default(),
+                }]);
+            }
+            frame(&ctx, &mut slot, vec![]);
+            let labels = frame(&ctx, &mut slot, vec![]);
+            click(&ctx, &mut slot, position(&labels, menu));
+            let mut out = ctx.run_ui(Default::default(), |ui| app.midi_tick(ui.ctx()));
+            out.textures_delta.clear();
+            assert_eq!(app.studio.main_panel.has(1, cutoff), expected);
+            assert!(!app.studio.main_panel.has(0, cutoff));
+            assert!(app.doc.modified);
+            assert_eq!(slot, initial);
+        }
     }
 
     #[test]

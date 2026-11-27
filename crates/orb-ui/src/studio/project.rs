@@ -12,6 +12,7 @@ const SYNTH_MAGIC: &[u8; 8] = b"ORB338S3";
 const EXTENDED_SYNTH_MAGIC: &[u8; 8] = b"ORB338S4";
 const HYBRID_SYNTH_MAGIC: &[u8; 8] = b"ORB338S5";
 const BAR_RATE_MAGIC: &[u8; 8] = b"ORB338S6";
+const MODULAR_RACK_MAGIC: &[u8; 8] = b"ORB338S7";
 const MAX_BYTES: usize = 256 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
 
@@ -37,6 +38,8 @@ pub struct Metadata {
     pub closed_hat: Option<u8>,
     pub sidechain: crate::sidechain::Settings,
     pub settings: Settings,
+    #[serde(default, skip_serializing_if = "super::midi::acid::MainPanel::is_default")]
+    pub main_panel: super::midi::acid::MainPanel,
 }
 
 #[derive(Clone)]
@@ -105,7 +108,12 @@ impl Project {
         let uses_bar_grid = self.metadata.settings.synth_slots.iter().any(|slot| {
             slot.legacy_128_bars || matches!(slot.length, orb_engine::studio::acid_synth::PhraseLength::Bars(_))
         });
-        let version = if uses_bar_grid { BAR_RATE_MAGIC } else if needs_hybrid { HYBRID_SYNTH_MAGIC } else if has_synth_data { EXTENDED_SYNTH_MAGIC } else { MAGIC };
+        let modular_rack = !self.metadata.main_panel.is_default() || self.metadata.settings.synth_slots.iter().any(|slot| {
+            let init = orb_engine::studio::acid_synth::Patch::INIT;
+            !slot.user_preset.is_empty() || slot.tb_enabled.is_some() || slot.edit_synth.is_some()
+                || slot.patch.lfo_sync != init.lfo_sync || slot.patch.lfo_division != init.lfo_division
+        });
+        let version = if modular_rack { MODULAR_RACK_MAGIC } else if uses_bar_grid { BAR_RATE_MAGIC } else if needs_hybrid { HYBRID_SYNTH_MAGIC } else if has_synth_data { EXTENDED_SYNTH_MAGIC } else { MAGIC };
         let mut out = version.to_vec();
         let metadata = toml::to_string(&self.metadata).map_err(|e| e.to_string())?;
         if metadata.len() > MAX_METADATA_BYTES {
@@ -132,17 +140,18 @@ impl Project {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() > MAX_BYTES || ![MAGIC, SYNTH_MAGIC, EXTENDED_SYNTH_MAGIC, HYBRID_SYNTH_MAGIC, BAR_RATE_MAGIC]
+        if bytes.len() > MAX_BYTES || ![MAGIC, SYNTH_MAGIC, EXTENDED_SYNTH_MAGIC, HYBRID_SYNTH_MAGIC, BAR_RATE_MAGIC, MODULAR_RACK_MAGIC]
             .iter().any(|magic| bytes.starts_with(&magic[..]))
         {
-            return Err("Not a supported Studio project (expected ORB338S2 through ORB338S6)".into());
+            return Err("Not a supported Studio project (expected ORB338S2 through ORB338S7)".into());
         }
-        let legacy_bar_grid = !bytes.starts_with(BAR_RATE_MAGIC);
+        let legacy_bar_grid = !bytes.starts_with(BAR_RATE_MAGIC) && !bytes.starts_with(MODULAR_RACK_MAGIC);
         let mut bytes = &bytes[8..];
         let mut metadata: Metadata = toml::from_str(
             std::str::from_utf8(take(&mut bytes, MAX_METADATA_BYTES)?).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
+        metadata.main_panel.sanitize();
         if legacy_bar_grid {
             for slot in &mut metadata.settings.synth_slots {
                 slot.migrate_legacy_bar_grid();
@@ -256,6 +265,43 @@ mod tests {
     }
 
     #[test]
+    fn layered_rack_restores_independent_routing_and_grid_without_legacy_conversion() {
+        use orb_engine::studio::acid_synth::PhraseLength;
+        let mut project = Project::decode(include_bytes!("../../../../assets/demos/Low-Orbit.recall")).unwrap();
+        let slot = &mut project.metadata.settings.synth_slots[1];
+        assert!(slot.enabled && !slot.tb_active());
+        slot.tb_enabled = Some(true);
+        slot.edit_synth = Some(false);
+        slot.set_length(PhraseLength::Bars(4));
+        slot.set_step_rate(192);
+        let bytes = project.encode().unwrap();
+        assert!(bytes.starts_with(MODULAR_RACK_MAGIC));
+        let loaded = Project::decode(&bytes).unwrap();
+        let slot = &loaded.metadata.settings.synth_slots[1];
+        assert!(slot.enabled && slot.tb_active() && !slot.editing_synth());
+        assert_eq!((slot.step_count(), slot.ticks_per_step()), (16, 192));
+    }
+
+    #[test]
+    fn main_panel_pins_roundtrip_in_order_per_slot_without_changing_audio() {
+        use crate::studio::midi::acid::target;
+        let mut project = Project::decode(include_bytes!("../../../../assets/demos/Low-Orbit.recall")).unwrap();
+        assert!(project.metadata.main_panel.is_default());
+        let original = project.metadata.settings.clone();
+        for key in ["acidsynth2.route2.amount", "acidsynth1.cutoff", "acidsynth2.fm_ratio4"] {
+            let (slot, field) = target(key).unwrap();
+            assert!(project.metadata.main_panel.update(slot, field, true));
+        }
+        let bytes = project.encode().unwrap();
+        assert!(bytes.starts_with(MODULAR_RACK_MAGIC));
+        let saved = Project::decode(&bytes).unwrap();
+        assert_eq!(saved.metadata.main_panel, project.metadata.main_panel);
+        let pins: Vec<_> = saved.metadata.main_panel.fields(1).map(|field| field.id).collect();
+        assert_eq!(pins, ["route2.amount", "fm_ratio4"]);
+        assert_eq!(saved.metadata.settings, original);
+    }
+
+    #[test]
     fn old_bar_projects_reopen_on_the_original_grid_and_keep_all_hidden_steps() {
         use orb_engine::studio::acid_synth::PhraseLength;
         let mut project = Project::decode(include_bytes!("../../../../assets/demos/Low-Orbit.recall")).unwrap();
@@ -304,6 +350,7 @@ mod tests {
         let project = Project {
             metadata: Metadata {
                 settings,
+                main_panel: Default::default(),
                 names: std::array::from_fn(|i| format!("Lane {i}")),
                 ir_name: "Test".into(),
                 sidechain: Default::default(),

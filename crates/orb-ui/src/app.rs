@@ -116,6 +116,7 @@ pub struct App {
     pub audio_session: Option<orb_player::output::Session>,
     pub audio_preferences: crate::audio::Preferences,
     pub(crate) settlement: u64,
+    pub(crate) user_bank: crate::user_bank::UserBank,
     pub studio: crate::studio::StudioUi,
     pub panel: Panel,
     /// The player the panel drives (task-045); without one the model's events pile up in
@@ -218,6 +219,7 @@ pub struct App {
 impl App {
     pub fn new(panel: Panel, shot: Option<Shot>) -> Self {
         Self {
+            user_bank: Default::default(),
             studio: crate::studio::StudioUi::default(),
             audio_session: None,
             audio_preferences: Default::default(),

@@ -1,6 +1,8 @@
 //! AcidSynth's live controls and polyphonic step editor for the two instrument slots.
 
-use super::{ACID, App, DIM, NOTES, Rack, Ui, button, egui, mix_knob};
+use super::{ACID, App, DIM, INK, NOTES, Rack, Ui, button, egui, fitted_button_font, mix_knob, paint_mix_knob};
+use crate::midi::MidiMenu;
+use crate::studio::midi::acid::{Domain, Field};
 use orb_engine::studio::acid_presets::{EXPERIMENTAL_START, PRESETS};
 use orb_engine::studio::acid_synth::{PhraseLength, Slot};
 
@@ -80,6 +82,58 @@ pub(super) fn phrase_length_picker(ui: &mut Ui, slot: &mut Slot, width: f32) -> 
     true
 }
 
+fn pinned_control(ui: &mut Ui, rack: Rack, row: usize, field: &Field, slot: &mut Slot, x: f32, y: f32) -> (bool, bool) {
+    let id = format!("acidsynth{}.{name}", row+1, name=field.id);
+    let rect = rack.rect(x, y, 43.0, 41.0);
+    let widget = egui::Id::unique(("acid-main-pin", row, field.id));
+    let response = ui.interact(rect, widget, egui::Sense::click_and_drag()).midi_menu(ui, &id);
+    let old = field.position(slot);
+    let mut next = old;
+    let mut audition = false;
+    if response.clicked() {
+        response.request_focus();
+        match field.domain {
+            Domain::Action => audition = true,
+            Domain::Switch => next = 1.0-old,
+            Domain::Choice(max) => next = (((old*f32::from(max)).round() as u8 + 1) % (max+1)) as f32 / f32::from(max),
+            _ => {}
+        }
+    }
+    if response.dragged_by(egui::PointerButton::Primary) && !matches!(field.domain, Domain::Action) {
+        let base = widget.with("start");
+        if response.drag_started_by(egui::PointerButton::Primary) { ui.ctx().data_mut(|d| d.insert_temp(base, old)); }
+        let starting = ui.ctx().data(|d| d.get_temp::<f32>(base)).unwrap_or(old);
+        let distance = ui.input(|i| i.pointer.press_origin().zip(i.pointer.interact_pos())
+            .map_or(0.0, |(origin, current)| (origin.y-current.y) / if i.modifiers.shift { 800.0 } else { 145.0 }));
+        next = (starting + distance).clamp(0.0, 1.0);
+    }
+    let changed = next != old && field.set_position(slot, next);
+    let value = field.display(slot);
+    let ink = if response.hovered() { ACID } else { INK };
+    let dial = rack.rect(x+2.0, y+11.0, 20.0, 25.0);
+    let vrect = rack.rect(x+22.0, y+13.0, 20.0, 20.0);
+    let name_rect = rack.rect(x, y, 43.0, 14.0);
+    ui.painter().rect_filled(rect, rack.scale*2.0, egui::Color32::from_rgb(23,26,26));
+    let label = match field.id {
+        "wave_a" => "Table A", "wave_b" => "Table B", "mix" => "Balance",
+        "filter_env" => "Filter env", "transpose_b" => "B transpose", "cutoff" => "Cutoff",
+        "lfo_division" => "LFO div", "fm_ratio2" => "OP2 ratio", "fm_ratio3" => "OP3 ratio",
+        "fm_ratio4" => "OP4 ratio", _ => field.label,
+    };
+    ui.painter().text(name_rect.center(), egui::Align2::CENTER_CENTER, label,
+        fitted_button_font(ui, name_rect, label, 10.0*rack.scale, rack.scale*0.45), ink);
+    if matches!(field.domain, Domain::Action) {
+        ui.painter().text(rect.center_bottom()-egui::vec2(0.0,12.0*rack.scale), egui::Align2::CENTER_CENTER,
+            "PLAY", egui::FontId::monospace(9.0*rack.scale), ACID);
+    } else {
+        paint_mix_knob(ui, rack.scale, dial, field.position(slot));
+        ui.painter().text(vrect.center(), egui::Align2::CENTER_CENTER, &value,
+            fitted_button_font(ui, vrect, &value, 9.0*rack.scale, rack.scale*0.3), ACID);
+    }
+    response.on_hover_text(format!("{}: {}\nRight-click for MIDI or to remove from Main Panel.", field.label, value));
+    (changed, audition)
+}
+
 impl App {
     pub(super) fn rack_acid_synth(&mut self, ui: &mut Ui, rack: Rack, row: usize, y: f32) {
         let slot = &mut self.studio.settings.synth_slots[row];
@@ -93,7 +147,7 @@ impl App {
                 let preset = usize::from(slot.preset).min(PRESETS.len() - 1);
                 egui::ComboBox::from_id_salt("preset")
                     .width(ui.available_width())
-                    .selected_text(PRESETS[preset].0)
+                    .selected_text(if slot.user_preset.is_empty() { PRESETS[preset].0 } else { &slot.user_preset })
                     .show_ui(ui, |ui| {
                         for (index, (name, _)) in PRESETS.iter().enumerate() {
                             if index == 0 {
@@ -102,7 +156,7 @@ impl App {
                                 ui.separator();
                                 ui.strong("Experimental");
                             }
-                            if ui.selectable_label(index == preset, *name).clicked() {
+                            if ui.selectable_label(index == preset && slot.user_preset.is_empty(), *name).clicked() {
                                 apply_preset(slot, index);
                                 changed = true;
                             }
@@ -128,16 +182,27 @@ impl App {
                 changed = true;
             }
         }
+        let compact = self.studio.main_panel.count(row) > 0;
         for (i, &(key, label)) in MACROS.iter().enumerate() {
             let mut value = (slot.macros[i] * 1000.0).round() as i32;
             let response = mix_knob(
                 ui, rack.scale, &format!("acidsynth{}.{key}", row + 1), label,
-                rack.rect(247.0 + i as f32 * 152.0, y + 38.0, 60.0, 71.0), &mut value,
+                if compact { rack.rect(224.0 + i as f32 * 60.0, y + 40.0, 55.0, 69.0) }
+                else { rack.rect(247.0 + i as f32 * 152.0, y + 38.0, 60.0, 71.0) },
+                &mut value,
             );
             if response.changed() {
                 slot.macros[i] = value as f32 / 1000.0;
                 changed = true;
             }
+        }
+        let mut audition_pin = false;
+        for (index, field) in self.studio.main_panel.fields(row).enumerate() {
+            let x = 470.0 + (index % 8) as f32 * 45.0;
+            let top = y + 33.0 + (index / 8) as f32 * 43.0;
+            let (edited, play) = pinned_control(ui, rack, row, field, slot, x, top);
+            changed |= edited;
+            audition_pin |= play;
         }
         let editor_id = egui::Id::unique("graphite-edit");
         if button(
@@ -211,9 +276,10 @@ impl App {
         let linked = self.generator.options.link_tb;
         if button(ui, rack, rack.rect(228.0, y + 9.0, 76.0, 19.0),
             (row, "acid-link"), "LINK A/B", linked)
-            .on_hover_text("Link generation across both slots. RND on AcidSynth follows the TB lines; RND on a TB follows the AcidSynth chords.").clicked() {
+            .on_hover_text("Generate related patterns for both TBs and the participating AcidSynth parts together.").clicked() {
             self.generator.options.link_tb = !linked;
         }
+        if audition_pin { self.audition_acid_patch(row); }
         self.rack_random_button(ui, rack, row, rack.rect(313.0, y + 9.0, 72.0, 19.0));
         if changed {
             self.studio.changed();
@@ -331,17 +397,30 @@ mod tests {
         let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(WIDTH, HEIGHT));
         let rack = Rack::fit(canvas);
         let y = ROWS[1].0;
-        let switch = rack.rect(140.0, y + 9.0, 73.0, 19.0).center();
+        let switch = rack.rect(150.0, y + 8.0, 66.0, 22.0).center();
+        let activate = rack.rect(84.0, y + 8.0, 63.0, 22.0).center();
+        let tb_toggle = rack.rect(26.0, y + 8.0, 55.0, 22.0).center();
         let tb_pattern = app.panel.pattern_bytes(1);
         let slot_a = app.studio.settings.synth_slots[0].clone();
         click(&ctx, &mut app, canvas, switch);
+        assert!(!app.studio.settings.synth_slots[1].enabled);
+        assert!(app.studio.settings.synth_slots[1].editing_synth());
+        click(&ctx, &mut app, canvas, activate);
         assert!(app.studio.settings.synth_slots[1].enabled);
+        assert!(app.studio.settings.synth_slots[1].tb_active());
         assert!(app.studio.content && app.doc.modified);
         click(&ctx, &mut app, canvas, rack.rect(28.0, y + 123.0, 34.0, 21.0).center());
         assert_eq!(app.studio.settings.synth_slots[1].step_ticks, 48);
         let before = app.studio.settings.synth_slots[1].clone();
         click(&ctx, &mut app, canvas, switch);
+        assert!(app.studio.settings.synth_slots[1].enabled);
+        assert!(!app.studio.settings.synth_slots[1].editing_synth());
+        click(&ctx, &mut app, canvas, tb_toggle);
+        assert!(!app.studio.settings.synth_slots[1].tb_active());
+        click(&ctx, &mut app, canvas, activate);
         assert!(!app.studio.settings.synth_slots[1].enabled);
+        click(&ctx, &mut app, canvas, tb_toggle);
+        click(&ctx, &mut app, canvas, activate);
         click(&ctx, &mut app, canvas, switch);
         assert_eq!(app.studio.settings.synth_slots[1], before);
         assert_eq!(app.studio.settings.synth_slots[0], slot_a);

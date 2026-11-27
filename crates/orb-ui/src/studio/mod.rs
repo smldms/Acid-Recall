@@ -86,6 +86,7 @@ pub struct StudioUi {
     pub warp_editor: Option<usize>,
     pub reverb_open: bool,
     pub settings: Settings,
+    pub main_panel: midi::acid::MainPanel,
     pub names: [String; 8],
     pub waves: [Option<Arc<Wave>>; 8],
     pub ir: Option<Arc<Wave>>,
@@ -125,6 +126,7 @@ impl Default for StudioUi {
             warp_editor: None,
             reverb_open: false,
             sent: settings.clone(),
+            main_panel: Default::default(),
             settings,
             names: std::array::from_fn(|i| format!("Sample {:02}", i + 1)),
             waves: std::array::from_fn(|_| None),
@@ -179,6 +181,7 @@ impl StudioUi {
         Some(Project {
             metadata: Metadata {
                 settings: self.settings.clone(),
+                main_panel: self.main_panel.clone(),
                 names: self.names.clone(),
                 ir_name: self.ir_name.clone(),
                 sidechain,
@@ -304,6 +307,7 @@ impl App {
                                 return;
                             }
                             self.studio.settings = project.metadata.settings.clone();
+                            self.studio.main_panel = project.metadata.main_panel.clone();
                             self.studio.sent = self.studio.settings.clone();
                             self.studio.names = project.metadata.names.clone();
                             self.studio.ir_name = project.metadata.ir_name.clone();

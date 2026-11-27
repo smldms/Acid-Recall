@@ -6,6 +6,72 @@ use crate::{
 use std::sync::Arc;
 
 #[test]
+fn both_tb_and_acidsynth_pairs_sum_independently_before_channel_inserts() {
+    fn run(tb: [bool; 2], synth: [bool; 2]) -> [[f32; 64]; 2] {
+        let mut studio = Studio::new(Box::new(Convolver::new(&[[0.0; 2]; 64]).unwrap()));
+        for row in 0..2 {
+            let slot = &mut studio.settings.synth_slots[row];
+            slot.tb_enabled = Some(tb[row]);
+            slot.enabled = synth[row];
+            slot.sequence_enabled = false;
+            slot.patch.attack = 0.0;
+            studio.live_note(row, acid_live::Event::On {
+                key: 1, pitch: 48 + 7 * row as u8, velocity: 105, grid: 0,
+            }, 0.0, 0.0);
+        }
+        let mut buses = [[0.0; 64]; 2];
+        for _ in 0..20 {
+            for (row, bus) in buses.iter_mut().enumerate() {
+                // Stand-ins for the distinct native 303 signals entering the strip.
+                bus.fill(if row == 0 { 0.125 } else { -0.0625 });
+                studio.synth_channel(row, bus, 0.0, 0.01, false);
+            }
+        }
+        for row in 0..2 {
+            assert_eq!(studio.synth_gate(row, 0.0, false), synth[row]);
+            assert_eq!(studio.synth_gate(row, 0.0, true), synth[row] || tb[row]);
+        }
+        buses
+    }
+
+    let off = [false; 2];
+    let on = [true; 2];
+    let silent = run(off, off);
+    let native = run(on, off);
+    let acid = run(off, on);
+    let both = run(on, on);
+    let crossed = run([true, false], [false, true]);
+    assert_eq!(silent, [[0.0; 64]; 2]);
+    assert_eq!(crossed, [native[0], acid[1]]);
+    for row in 0..2 {
+        assert!(acid[row].iter().any(|v| v.abs() > 0.001));
+        for i in 0..64 {
+            assert_eq!(both[row][i], native[row][i] + acid[row][i]);
+        }
+    }
+}
+
+#[test]
+fn arming_a_silent_layer_does_not_widen_or_reverberate_its_tb() {
+    let mut studio = Studio::new(Box::new(Convolver::new(&[[0.0; 2]; 64]).unwrap()));
+    let slot = &mut studio.settings.synth_slots[0];
+    slot.enabled = true;
+    slot.tb_enabled = Some(true);
+    slot.sequence_enabled = false;
+    slot.macros[2] = 1.0;
+    slot.macros[3] = 1.0;
+    for _ in 0..20 {
+        studio.begin();
+        let mut bus = std::array::from_fn(|i| i as f32 / 128.0);
+        studio.synth_channel(0, &mut bus, 0.0, 0.01, false);
+        for (j, &sample) in bus.iter().enumerate() {
+            assert_eq!(studio.strip_sample(0, j, sample, 1.0, 1.0), (f64::from(sample), f64::from(sample)));
+        }
+        assert_eq!(studio.send, [[0.0; 64]; 2]);
+    }
+}
+
+#[test]
 fn sampler_sidechain_uses_each_lanes_own_machine_and_voice_with_global_off() {
     let mut studio = Studio::new(Box::new(Convolver::new(&[[0.0; 2]; 64]).unwrap()));
     for (i, frame) in [[0.5, 0.0], [0.0, 0.5]].into_iter().enumerate() {

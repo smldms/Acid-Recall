@@ -633,6 +633,7 @@ impl super::acid_synth::Slot {
     /// Replace only the sound. Macro positions and the playing phrase belong to the slot.
     pub fn select_factory_preset(&mut self, index: usize) {
         if let Some((_, patch)) = PRESETS.get(index) {
+            self.user_preset.clear();
             self.preset = index as u8;
             self.patch = *patch;
         }

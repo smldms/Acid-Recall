@@ -35,6 +35,10 @@ impl<'a> Voicer<'a> {
     }
 
     pub(super) fn next(&mut self, weights: &[i32; 12], variation: u8) -> [u8; 4] {
+        self.voice(weights, variation, &[])
+    }
+
+    fn voice(&mut self, weights: &[i32; 12], variation: u8, common: &[u8]) -> [u8; 4] {
         let scale = if self.scale.is_empty() { &[0, 2, 3, 5, 7, 8, 10][..] } else { self.scale };
         let stage = PROGRESSIONS[self.plan][self.event % 8] * scale.len() / 7;
         let color = (self.event + self.rng.pick(3)) % 3;
@@ -49,6 +53,7 @@ impl<'a> Voicer<'a> {
             for (quality, shape) in COLORS.iter().enumerate() {
                 if !shape.iter().all(|d| scale.contains(&((interval + d) % 12))) { continue; }
                 let pcs = shape.map(|d| (chord_root + d) % 12);
+                if !common.iter().all(|pc| pcs.contains(pc)) { continue; }
                 let support: i64 = weights.iter().enumerate().map(|(bass, weight)| {
                     let consonance = if pcs.contains(&(bass as u8)) { 110 } else {
                         // Guide tones of two basslines can compete. Prefer consonant intervals
@@ -92,6 +97,78 @@ impl<'a> Voicer<'a> {
         self.event += 1;
         best.2
     }
+}
+
+/// Compose a shared progression. The tonic and fifth remain available to a short TB riff
+/// on every repetition; the other voices can change for the full duration of the pad.
+pub(super) fn joint_phrases(options: &super::Options, slots: &[Slot; 2], active: [bool; 2], seed: u64) -> [Vec<Step>; 2] {
+    let mut out = std::array::from_fn(|i| if active[i] {
+        vec![Step::default(); slots[i].step_count()]
+    } else { Vec::new() });
+    if options.density == 0 { return out; }
+    let duration = |i: usize| out[i].len() * usize::from(slots[i].ticks_per_step());
+    let lead = usize::from(duration(1) > duration(0));
+    let other = 1 - lead;
+    let cycle = duration(lead);
+    if cycle == 0 { return out; }
+    let ticks = usize::from(slots[lead].ticks_per_step());
+    let other_ticks = usize::from(slots[other].ticks_per_step());
+    // Same-length phrases with commensurate rates can share every harmonic change exactly.
+    let aligned = duration(other) == cycle && ticks.max(other_ticks).is_multiple_of(ticks.min(other_ticks));
+    let grain = if aligned { ticks.max(other_ticks) } else { ticks };
+    let root = options.root % 12;
+    let common = [root, (root + 7) % 12];
+    let mut voicer = Voicer::new(root, options.scale.intervals(), seed, false);
+    let mut rng = Rng(seed ^ 0x6069_7172_0903_0023);
+    let mut at = 0;
+    while at < cycle {
+        let span = if cycle <= 768 { 192 } else if cycle <= 3072 { 384 } else { 768 };
+        let beats = if rng.chance(options.variation) { span } else { 2 * span };
+        let end = (at + (beats / grain).max(1) * grain).min(cycle);
+        let notes = voicer.voice(&[0; 12], options.variation, &common);
+        out[lead][at / ticks] = Step { notes, gate_steps: ((end - at) / ticks) as u16 };
+        if aligned {
+            // Voice B takes the upper extension and inverts it into a brighter register.
+            let mut upper = [notes[1] + 12, notes[2] + 12, notes[3] + 12, notes[0] + 24];
+            upper.sort_unstable();
+            out[other][at / other_ticks] = Step { notes: upper, gate_steps: ((end - at) / other_ticks) as u16 };
+        }
+        at = end;
+    }
+    if active[other] && !aligned {
+        // Two cycles of different lengths meet again at offsets separated by their GCD.
+        // A colour note is available only if it belongs to *every* overlapping lead chord.
+        let count = out[other].len();
+        let short_cycle = count * other_ticks;
+        let (mut gcd, mut remainder) = (cycle, short_cycle);
+        while remainder != 0 { (gcd, remainder) = (remainder, gcd % remainder); }
+        let lead_chords: Vec<_> = out[lead].iter().enumerate().filter(|(_, s)| s.notes[0] != 0)
+            .map(|(i, s)| {
+                let mask = s.notes.iter().fold(0u16, |mask, note| mask | (1 << (note % 12)));
+                (i * ticks, (i + usize::from(s.gate_steps)) * ticks, mask)
+            }).collect();
+        let unit = (384 / other_ticks).max(1);
+        let inversion = rng.pick(2);
+        for (event, start) in (0..count).step_by(unit).enumerate() {
+            let tonic = 60 + root;
+            let gate = unit.min(count - start);
+            let phase = start * other_ticks % gcd;
+            let mut mask = 0x0fff;
+            for &(begin, end, chord) in &lead_chords {
+                let elapsed = (begin + gcd - phase) % gcd;
+                if elapsed < gate * other_ticks || gcd - elapsed < end - begin { mask &= chord; }
+            }
+            let mut notes = if (event + inversion) % 2 == 0 { [tonic, tonic + 7, tonic + 12, 0] }
+                            else { [tonic - 5, tonic, tonic + 12, 0] };
+            let colors = mask & !(1 << root | 1 << common[1]);
+            if colors != 0 {
+                let pc = colors.trailing_zeros() as u8;
+                notes[3] = tonic + 12 + (pc + 12 - root) % 12;
+            }
+            out[other][start] = Step { notes, gate_steps: gate as u16 };
+        }
+    }
+    out
 }
 
 /// Keep a pad under the groove until the next actual chord attacks, including across loop wrap.
@@ -175,7 +252,11 @@ pub(super) fn fit_to_chords(bytes: &mut [u8], tune: i16, slots: &[&Slot], seed: 
     for (i, data) in bytes[2..].chunks_exact_mut(6).take(len).enumerate() {
         if data[5] != 0 || totals[i] == 0 { continue; }
         let old = i32::from(data[0]) + 12 * i32::from(data[3] != 0) - 12 * i32::from(data[4] != 0);
-        let pitch = (-12_i32..=23).max_by_key(|&p| {
+        let common = votes[i].iter().any(|&v| v == 1000 * totals[i]);
+        let pitch = (-12_i32..=23).filter(|&p| {
+            let pc = (p + i32::from(tune)).rem_euclid(12) as usize;
+            !common || votes[i][pc] == 1000 * totals[i]
+        }).max_by_key(|&p| {
             let pc = (p + i32::from(tune)).rem_euclid(12) as usize;
             let distance = i64::from((old-p).abs());
             (votes[i][pc] / totals[i] - distance * 28, rng.next())
@@ -190,6 +271,43 @@ pub(super) fn fit_to_chords(bytes: &mut [u8], tune: i16, slots: &[&Slot], seed: 
 mod tests {
     use super::*;
     use crate::generator::{Scale, bytes303, note, pitch, steps303};
+
+    #[test]
+    fn seven_and_thirteen_step_basses_stay_inside_both_pads_as_a_long_progression_repeats() {
+        use crate::generator::{Options, tb_pair_lengths};
+        use orb_engine::studio::acid_synth::PhraseLength;
+        let options = Options { root: 3, variation: 76, ..Options::default() };
+        let mut slots: [Slot; 2] = Default::default();
+        slots[0].set_length(PhraseLength::Bars(8));
+        slots[0].set_step_rate(192);
+        slots[1].set_length(PhraseLength::Bars(1));
+        slots[1].set_step_rate(48);
+        let parts = joint_phrases(&options, &slots, [true, true], 778);
+        for (slot, part) in slots.iter_mut().zip(parts) {
+            for (i, step) in part.into_iter().enumerate() { *slot.step_mut(i) = step; }
+        }
+        let pads = slots.each_ref().map(chord_masks);
+        assert!(pads[0].iter().copied().collect::<std::collections::BTreeSet<_>>().len() >= 2);
+        assert!(pads[1].iter().all(|mask| mask.count_ones() >= 2));
+        let pair = tb_pair_lengths(&options, [7, 13], 778);
+        for (row, mut bytes) in pair.into_iter().enumerate() {
+            let tune = [-2, 3][row];
+            fit_to_chords(&mut bytes, tune, &[&slots[0], &slots[1]], 778);
+            let steps = steps303(&bytes);
+            let len = usize::from(bytes[1]);
+            assert!(steps[..len].iter().any(|n| !n.rest));
+            // Eight bars is 128 sixteenths. Test every phase of each odd-length bass loop.
+            for beat in 0..128 * len {
+                let n = steps[beat % len];
+                if n.rest { continue; }
+                let sounding = (pitch(n) + i32::from(tune)).rem_euclid(12);
+                let lead = pads[0][beat / 4 % pads[0].len()];
+                let short = pads[1][beat % pads[1].len()];
+                assert_ne!(lead & short & (1 << sounding), 0, "row {row}, beat {beat}");
+                assert_eq!(short & !lead, 0, "short pad outside long harmony at beat {beat}");
+            }
+        }
+    }
 
     #[test]
     fn eight_bars_over_a_d_pedal_reharmonize_with_voice_leading_and_stay_in_key() {

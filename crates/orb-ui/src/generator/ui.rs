@@ -2,7 +2,7 @@ use eframe::egui::{self, Align2, Color32, Context, FontId, Rect, Sense, Ui};
 
 use super::{Change, DrumStyle, Rng, Scale, Undo, drum_pattern, tb_pair, tb_pair_lengths};
 use super::acid::{PadChange, Riff, linked_phrase};
-use super::harmony::fit_to_chords;
+use super::harmony::{fit_to_chords, joint_phrases};
 use orb_engine::studio::acid_synth::Slot;
 use crate::app::{App, View};
 
@@ -41,15 +41,14 @@ fn rack_button(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Destination {
     LocalPad,
-    ActivePads,
+    Joint,
     SelectedPad,
-    BothTbs,
     BothTbsFromSelectedPad,
 }
 
 impl App {
     fn generator_machine(&self, row: usize) -> &'static str {
-        if row < 2 && self.studio.settings.synth_slots[row].enabled {
+        if row < 2 && self.studio.settings.synth_slots[row].editing_synth() {
             ["AcidSynth A", "AcidSynth B"][row]
         } else {
             MACHINES[row]
@@ -65,22 +64,32 @@ impl App {
             let knob = self.panel.knob(["tb303_1.tune", "tb303_2.tune"][i]);
             orb_engine::tb303::tune_semitones(crate::behavior::knob_send(knob) as u8)
         });
-        let reverse = matches!(target, Destination::BothTbs | Destination::BothTbsFromSelectedPad);
+        let reverse = target == Destination::BothTbsFromSelectedPad;
+        let joint = target == Destination::Joint;
         let linked = target != Destination::LocalPad;
-        let mut riffs: Vec<_> = (0..2).map(|i| {
-            Riff::new(&original[i], tuning[i], if slots[i].enabled { 1 } else { 4 })
-        }).collect();
-        let anchor = tb_pair(options, 16, seed)[0].clone();
-        if !linked || riffs.iter().all(Riff::silent) {
+        let mut riffs = Vec::new();
+        if target == Destination::SelectedPad {
+            riffs.extend((0..2).map(|i| {
+                Riff::new(&original[i], tuning[i], if slots[i].tb_active() { 4 } else { 1 })
+            }));
+        }
+        if !joint && !reverse && riffs.iter().all(Riff::silent) {
+            let [anchor, _] = tb_pair(options, 16, seed);
             riffs = vec![Riff::new(&anchor, 0, 1)];
         }
 
+        let active = std::array::from_fn(|i| slots[i].enabled || (i == row && slots[i].editing_synth()));
+        let mut composition = joint.then(|| joint_phrases(options, slots, active, seed));
         let mut pads = Vec::new();
         if !reverse {
             for (index, slot) in slots.iter().enumerate() {
-                if index != row && !(target == Destination::ActivePads && slot.enabled) { continue; }
+                let participating = if joint { active[index] } else { index == row };
+                if !participating { continue; }
                 let upper = linked && index == 1 && slots[0].enabled;
-                let after = linked_phrase(options, &riffs, slot, seed, upper);
+                let after = match &mut composition {
+                    Some(parts) => std::mem::take(&mut parts[index]),
+                    None => linked_phrase(options, &riffs, slot, seed, upper),
+                };
                 pads.push(PadChange {
                     row: index, length: slot.length, ticks: slot.ticks_per_step(),
                     before: (0..slot.step_count()).map(|i| slot.step(i)).collect(),
@@ -98,7 +107,7 @@ impl App {
             vec![&slots[row]]
         } else {
             slots.iter().enumerate().filter(|(i, slot)| {
-                slot.enabled || (target == Destination::SelectedPad && *i == row)
+                slot.enabled || pads.iter().any(|pad| pad.row == *i)
             }).map(|(_, slot)| slot).collect()
         };
         let mut changes = Vec::new();
@@ -120,7 +129,7 @@ impl App {
             let lengths = [original[0][1], original[1][1]];
             let pair = tb_pair_lengths(options, lengths, seed);
             for (i, mut after) in pair.into_iter().enumerate() {
-                if !reverse && !slots[i].enabled { continue; }
+                if !joint && !reverse && slots[i].tb_active() { continue; }
                 fit_to_chords(&mut after, tuning[i], &sources, seed.wrapping_add(i as u64));
                 // Off-grid notes are dormant when the TB pattern is shorter than sixteen.
                 let active_end = 2 + usize::from(lengths[i].clamp(1, 16)) * 6;
@@ -137,6 +146,8 @@ impl App {
         self.generator.undo = Some(Undo { changes, pads, tuning: None });
         self.generator.notice = Some(if options.density == 0 {
             "Density is zero. Generated rests.".into()
+        } else if joint {
+            "Composed both TB lines and the synth parts together.".into()
         } else if reverse {
             "Generated TB A and TB B from the chord phrase.".into()
         } else if linked {
@@ -186,18 +197,14 @@ impl App {
             return;
         }
         self.flush_generator_edits();
-        if row < 2 && self.studio.settings.synth_slots.iter().any(|slot| slot.enabled)
-            && (self.studio.settings.synth_slots[row].enabled || self.generator.options.link_tb)
-        {
-            let target = if !self.generator.options.link_tb {
-                Destination::LocalPad
-            } else if self.studio.settings.synth_slots[row].enabled {
-                Destination::ActivePads
-            } else {
-                Destination::BothTbs
-            };
-            self.generate_with_pad(row, seed, target);
-            return;
+        if row < 2 {
+            let slots = &self.studio.settings.synth_slots;
+            let editing_synth = slots[row].editing_synth();
+            let joint = self.generator.options.link_tb && (editing_synth || slots.iter().any(|slot| slot.enabled));
+            if joint || editing_synth {
+                self.generate_with_pad(row, seed, if joint { Destination::Joint } else { Destination::LocalPad });
+                return;
+            }
         }
         let pattern_size = if row < 2 { 98 } else { 194 };
         if self
@@ -452,7 +459,7 @@ impl App {
                         });
                 });
                 ui.checkbox(&mut o.link_tb, "LINK instrument slots");
-                ui.small("With AcidSynth active, Random on a synth reads both TBs and updates hidden TB lines. Random on a TB writes both basslines from the synth chords.");
+                ui.small("Linked Random composes both TBs and the active synth phrases together. Use Chord Lab to generate in just one direction.");
                 ui.add(egui::Slider::new(&mut o.density, 0..=100).text("Notes (%)"));
                 ui.add(egui::Slider::new(&mut o.accents, 0..=100).text("Accents (%)"));
                 ui.add(egui::Slider::new(&mut o.slides, 0..=100).text("Slides (%)"));
@@ -487,7 +494,7 @@ impl App {
                             if length != before {
                                 self.drum_set_length(row, length);
                             }
-                        } else if self.studio.settings.synth_slots[row].enabled {
+                        } else if self.studio.settings.synth_slots[row].editing_synth() {
                             ui.label(format!("{} steps", self.studio.settings.synth_slots[row].step_count()));
                         } else {
                             let pattern = usize::from(self.panel.rows[row].pattern);
@@ -535,6 +542,26 @@ impl App {
 mod pad_tests {
     use crate::{app::App, model::Panel};
     use orb_engine::studio::acid_synth::{PhraseLength, Step};
+
+    #[test]
+    fn switching_editor_preserves_independent_layer_power_and_selects_the_unlinked_target() {
+        let mut app = App::new(Panel::new(), None);
+        let slot = &mut app.studio.settings.synth_slots[0];
+        slot.set_synth_active(true);
+        slot.edit_synth = Some(false);
+        let synth_before = slot.clone();
+        let tb_before = app.panel.pattern_bytes(0);
+        app.random_pattern_with_seed(0, 32);
+        assert_ne!(app.panel.pattern_bytes(0), tb_before);
+        assert_eq!(app.studio.settings.synth_slots[0], synth_before);
+        app.studio.settings.synth_slots[0].edit_synth = Some(true);
+        let new_tb = app.panel.pattern_bytes(0);
+        app.random_pattern_with_seed(0, 44);
+        assert_eq!(app.panel.pattern_bytes(0), new_tb);
+        assert_ne!(app.studio.settings.synth_slots[0].steps, synth_before.steps);
+        assert!(app.studio.settings.synth_slots[0].tb_active());
+        assert!(app.studio.settings.synth_slots[0].enabled);
+    }
 
     #[test]
     fn both_synths_write_their_hidden_tbs_and_undo_restores_all_four_patterns() {
@@ -609,7 +636,7 @@ mod pad_tests {
     }
 
     #[test]
-    fn mixed_rack_uses_the_clicked_instrument_direction_and_restores_every_target() {
+    fn mixed_rack_linked_rnd_composes_both_tbs_and_the_pad_from_either_row() {
         for pad in 0..2 {
             let tb = 1 - pad;
             let mut app = App::new(Panel::new(), None);
@@ -625,19 +652,11 @@ mod pad_tests {
             for initiator in [pad, tb] {
                 app.random_pattern_with_seed(initiator, 405);
                 assert_ne!(app.panel.pattern_bytes(pad), hidden_tb);
-                if initiator == pad {
-                    assert_eq!(app.panel.pattern_bytes(tb), original_tb);
-                } else {
-                    assert_ne!(app.panel.pattern_bytes(tb), original_tb);
-                }
+                assert_ne!(app.panel.pattern_bytes(tb), original_tb);
                 let slot = &app.studio.settings.synth_slots[pad];
                 assert_eq!(slot.length, PhraseLength::Steps(64));
                 assert_eq!(slot.patch, patch);
-                if initiator == pad {
-                    assert!((16..64).any(|i| slot.step(i).notes[0] > 0));
-                } else {
-                    assert!(original.iter().enumerate().all(|(i, step)| slot.step(i) == *step));
-                }
+                assert!((16..64).any(|i| slot.step(i).notes[0] > 0));
                 assert!(app.undo_random());
                 assert_eq!(app.panel.pattern_bytes(tb), original_tb);
                 assert_eq!(app.panel.pattern_bytes(pad), hidden_tb);

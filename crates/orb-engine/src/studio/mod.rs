@@ -129,6 +129,7 @@ pub struct Studio {
     high_state: [f64; 2],
     low_state: [f64; 2],
     smooth_sends: [f64; 4],
+    layered_base_send: [f64; 2],
     smooth_return: f64,
     wet_remaining: usize,
     ducker: crate::sidechain::Ducker,
@@ -192,6 +193,7 @@ impl Studio {
             high_state: [0.0; 2],
             low_state: [0.0; 2],
             smooth_sends: [0.0; 4],
+            layered_base_send: [0.0; 2],
             smooth_return: 0.0,
             wet_remaining: 0,
             ducker: crate::sidechain::Ducker::default(),
@@ -249,14 +251,32 @@ impl Studio {
         }
     }
 
-    pub(crate) fn synth_spread(&mut self, c: usize, sample: f32) -> f64 {
+    pub(crate) fn layered_synth_tap(&mut self, c: usize) -> Option<&mut crate::frame::Block> {
+        let slot = self.settings.synth_slots.get(c)?;
+        (slot.enabled && slot.tb_active()).then(|| &mut self.synths[c].dry)
+    }
+
+    pub(crate) fn strip_sample(&mut self, c: usize, j: usize, mono: f32, gl: f64, gr: f64) -> (f64, f64) {
+        let (mut left, mut right) = (f64::from(mono) * gl, f64::from(mono) * gr);
+        let mut isolated = None;
         if c < 2 && self.settings.synth_slots[c].enabled {
-            self.synths[c].spread(sample, self.settings.synth_slots[c].macros[2])
-        } else { 0.0 }
+            let slot = &self.settings.synth_slots[c];
+            let layered = slot.tb_active();
+            let synth = if layered { self.synths[c].dry[j] } else { mono };
+            let side = self.synths[c].spread(synth, slot.macros[2]);
+            left += side * gl;
+            right -= side * gr;
+            if layered {
+                isolated = Some(((f64::from(synth) + side) * gl, (f64::from(synth) - side) * gr));
+            }
+        }
+        self.route_channel(c, j, left, right, isolated);
+        (left, right)
     }
 
     pub(crate) fn synth_gate(&self, c: usize, tick: f64, native: bool) -> bool {
-        if self.settings.synth_slots[c].enabled { self.synths[c].gate(tick) } else { native }
+        let slot = &self.settings.synth_slots[c];
+        (slot.tb_active() && native) || (slot.enabled && self.synths[c].gate(tick))
     }
 
     pub fn begin(&mut self) {
@@ -311,6 +331,11 @@ impl Studio {
     }
 
     pub fn channel(&mut self, channel: usize, sample: usize, left: f64, right: f64) {
+        self.route_channel(channel, sample, left, right, None);
+    }
+
+    fn route_channel(&mut self, channel: usize, sample: usize, left: f64, right: f64,
+        isolated_synth: Option<(f64, f64)>) {
         self.meters[channel].sample(left);
         self.meters[channel].sample(right);
         let target = if self.settings.enabled {
@@ -323,8 +348,24 @@ impl Studio {
             0.0
         };
         smooth(&mut self.smooth_sends[channel], target, 0.002);
-        self.send[0][sample] += left * self.smooth_sends[channel];
-        self.send[1][sample] += right * self.smooth_sends[channel];
+        let full = self.smooth_sends[channel];
+        if let Some((synth_left, synth_right)) = isolated_synth {
+            // Strip send includes both instruments after inserts. Only AcidSynth contributes
+            // the extra send supplied by the patch's Space macro, via its pre-insert tap.
+            let base = if self.settings.enabled { self.settings.sends[channel] } else { 0.0 };
+            smooth(&mut self.layered_base_send[channel], base, 0.002);
+            let shared = self.layered_base_send[channel];
+            self.send[0][sample] += left * shared + synth_left * (full - shared);
+            self.send[1][sample] += right * shared + synth_right * (full - shared);
+        } else {
+            self.send[0][sample] += left * full;
+            self.send[1][sample] += right * full;
+            if channel < 2 {
+                self.layered_base_send[channel] = if self.settings.enabled {
+                    self.settings.sends[channel].min(full)
+                } else { 0.0 };
+            }
+        }
     }
 
     pub fn process(

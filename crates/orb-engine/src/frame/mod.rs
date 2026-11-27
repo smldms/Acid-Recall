@@ -1033,9 +1033,11 @@ impl Frame {
             // The optional tool ducks the TB bus after its inserts, before dry mixing and
             // new delay sends. Unity is skipped, retaining the original bypass arithmetic.
             if c < 2 {
-                for (sample, &gain) in bus.iter_mut().zip(&duck[c]) {
+                let mut tap = self.studio.as_mut().and_then(|studio| studio.layered_synth_tap(c));
+                for (index, (sample, &gain)) in bus.iter_mut().zip(&duck[c]).enumerate() {
                     if gain != 1.0 {
                         *sample = st(*sample as f64 * gain as f64);
+                        if let Some(dry) = tap.as_mut() { dry[index] *= gain; }
                     }
                 }
             }
@@ -1070,10 +1072,7 @@ impl Frame {
                     let b = bus[j] as f64;
                     let (mut left, mut right) = (b * gl, b * gr);
                     if let Some(studio) = &mut self.studio {
-                        let side = studio.synth_spread(c, bus[j]);
-                        left += side * gl;
-                        right -= side * gr;
-                        studio.channel(c, j, left, right);
+                        (left, right) = studio.strip_sample(c, j, bus[j], gl, gr);
                     }
                     l[j] = st(left + l[j] as f64);
                     r[j] = st(right + r[j] as f64);

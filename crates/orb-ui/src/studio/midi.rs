@@ -6,7 +6,7 @@ use orb_engine::studio::{
 };
 use orb_player::Command;
 
-mod acid;
+pub(crate) mod acid;
 
 pub(crate) fn registered_controls() -> &'static [(String, String)] {
     static CONTROLS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
@@ -111,7 +111,8 @@ pub fn is_action(id: &str) -> bool {
 }
 
 pub fn is_boolean(id: &str) -> bool {
-    matches!(id, "acidsynth1.sequence_enabled" | "acidsynth2.sequence_enabled" | "studio.enabled")
+    acid::target(id).is_some_and(|(_, f)| matches!(f.domain, acid::Domain::Switch))
+        || matches!(id, "studio.enabled")
         || matches!(id, "duck1.on" | "duck2.on" | "sampler.dist" | "sampler.on")
         || id.starts_with("sampler")
             && [".reverse", ".mute", ".solo", ".sidechain", ".warp"]
@@ -895,7 +896,7 @@ mod tests {
                         assert_eq!(kind(&id), Some(Kind::Switch));
                         for raw in [0, 127, 0] {
                             move_cc(&mut app, &mut router, &id, raw, true);
-                            assert_eq!(app.studio.settings.synth_slots[row].sequence_enabled, raw != 0);
+                            assert!(field.represents(&app.studio.settings.synth_slots[row], raw), "{id}");
                         }
                     }
                     _ => {

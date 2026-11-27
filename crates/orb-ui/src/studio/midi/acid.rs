@@ -1,8 +1,8 @@
 //! The editor and MIDI router share stable IDs for each AcidSynth slot.
-use orb_engine::studio::{acid_presets::PRESETS, acid_synth::Slot};
+use orb_engine::studio::{acid_presets::PRESETS, acid_synth::{LFO_DIVISIONS, Slot}};
 
 #[derive(Clone, Copy)]
-pub(super) enum Domain {
+pub(crate) enum Domain {
     Unit,
     Ratio,
     Bipolar,
@@ -39,7 +39,7 @@ impl Domain {
     }
 }
 
-pub(super) struct Field {
+pub(crate) struct Field {
     pub id: &'static str,
     pub label: &'static str,
     pub domain: Domain,
@@ -48,6 +48,68 @@ pub(super) struct Field {
 }
 
 impl Field {
+    pub fn position(&self, slot: &Slot) -> f32 {
+        let value = (self.get)(slot);
+        match self.domain {
+            Domain::Unit | Domain::Switch => value,
+            Domain::Ratio => (value - 0.25) / 11.75,
+            Domain::Bipolar => (value + 1.0) / 2.0,
+            Domain::Semitones => (value + 24.0) / 48.0,
+            Domain::Choice(max) => value / f32::from(max.max(1)),
+            Domain::Action => 0.0,
+        }
+    }
+
+    pub fn set_position(&self, slot: &mut Slot, position: f32) -> bool {
+        let n = position.clamp(0.0, 1.0);
+        let value = match self.domain {
+            Domain::Unit => n,
+            Domain::Ratio => 0.25 + n * 11.75,
+            Domain::Bipolar => n * 2.0 - 1.0,
+            Domain::Semitones => (n * 48.0).round() - 24.0,
+            Domain::Choice(max) => (n * f32::from(max)).round(),
+            Domain::Switch => f32::from(u8::from(n >= 0.5)),
+            Domain::Action => return false,
+        };
+        if (self.get)(slot) == value { return false; }
+        (self.set)(slot, value);
+        true
+    }
+
+    pub fn display(&self, slot: &Slot) -> String {
+        let value = (self.get)(slot);
+        let index = value.max(0.0) as usize;
+        if self.id == "lfo_division" { return LFO_DIVISIONS[index.min(LFO_DIVISIONS.len()-1)].0.into(); }
+        if self.id == "preset" {
+            if !slot.user_preset.is_empty() { return slot.user_preset.clone(); }
+            return PRESETS.get(index).map_or("?", |preset| preset.0).into();
+        }
+        let choices: &[&str] = match self.id {
+            "osc_mode" => &["Blend", "Ring", "Phase", "FM4", "Sync Fold"],
+            "filter_mode" => &["LP", "BP", "HP", "Notch"],
+            "lfo_target" => &["Colour", "Filter", "Pitch", "Mix"],
+            "lfo_shape" => &["Sine", "Tri", "Ramp", "Square"],
+            "fm_algorithm" => &["Cascade", "Pairs", "Fan", "Branch"],
+            key if key.ends_with(".source") => &["Off", "LFO", "Amp env", "Timbre", "Motion", "Width", "Space"],
+            key if key.ends_with(".dest") => match slot.patch.osc_mode {
+                3 => &["FM index", "Feedback", "Cutoff", "Mix", "Pitch", "Drive"],
+                4 => &["Fold", "Sync", "Cutoff", "Mix", "Pitch", "Drive"],
+                _ => &["Wave A", "Wave B", "Cutoff", "Mix", "Pitch", "Drive"],
+            },
+            _ => &[],
+        };
+        if let Some(label) = choices.get(index) { return (*label).into(); }
+        match self.domain {
+            Domain::Unit => format!("{:.0}%", value * 100.0),
+            Domain::Ratio => format!("{value:.2}×"),
+            Domain::Bipolar => format!("{:+.0}%", value * 100.0),
+            Domain::Semitones => format!("{value:+.0} st"),
+            Domain::Choice(_) => format!("{}", index + 1),
+            Domain::Switch => if value == 0.0 { "Off" } else { "On" }.into(),
+            Domain::Action => "Play".into(),
+        }
+    }
+
     pub fn cc(&self, slot: &Slot) -> u8 {
         self.domain.encode((self.get)(slot))
     }
@@ -94,6 +156,8 @@ pub(super) static FIELDS: &[Field] = &[
     field!("drive", "Drive", Unit, patch.drive),
     field!("chorus", "Chorus", Unit, patch.chorus),
     field!("lfo_rate", "LFO rate", Unit, patch.lfo_rate),
+    field!("lfo_sync", "LFO tempo sync", Domain::Switch, patch.lfo_sync),
+    field!("lfo_division", "LFO tempo division", Choice((LFO_DIVISIONS.len() - 1) as u8), patch.lfo_division),
     field!("lfo_depth", "LFO depth", Unit, patch.lfo_depth),
     field!("fm_index", "FM index", Unit, patch.fm_index),
     field!("fm_feedback", "FM feedback", Unit, patch.fm_feedback),
@@ -128,8 +192,76 @@ pub(super) static FIELDS: &[Field] = &[
         get: |_| 0.0, set: |_, _| {} },
 ];
 
-pub(super) fn target(id: &str) -> Option<(usize, &'static Field)> {
+pub(crate) fn target(id: &str) -> Option<(usize, &'static Field)> {
     let (slot, field) = id.split_once('.')?;
     let row = match slot { "acidsynth1" => 0, "acidsynth2" => 1, _ => return None };
     Some((row, FIELDS.iter().find(|parameter| parameter.id == field)?))
+}
+
+/// Project UI state, never sent across the real-time audio boundary.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct MainPanel([Vec<String>; 2]);
+
+pub(crate) const MAX_PINS: usize = 16;
+
+impl MainPanel {
+    pub fn is_default(&self) -> bool { self.0.iter().all(Vec::is_empty) }
+
+    pub fn fields(&self, row: usize) -> impl Iterator<Item = &'static Field> + '_ {
+        self.0[row].iter().filter_map(|key| FIELDS.iter().find(|f| f.id == key))
+    }
+
+    pub fn count(&self, row: usize) -> usize { self.0[row].len() }
+
+    pub fn has(&self, row: usize, field: &Field) -> bool {
+        self.0[row].iter().any(|key| key == field.id)
+    }
+
+    pub fn update(&mut self, row: usize, field: &Field, add: bool) -> bool {
+        let entries = &mut self.0[row];
+        let at = entries.iter().position(|key| key == field.id);
+        match (add, at) {
+            (true, None) if entries.len() < MAX_PINS => entries.push(field.id.into()),
+            (false, Some(i)) => { entries.remove(i); }
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn sanitize(&mut self) {
+        for row in &mut self.0 {
+            let mut seen = Vec::with_capacity(MAX_PINS);
+            for id in row.drain(..) {
+                if seen.len() == MAX_PINS { break; }
+                if !seen.contains(&id) && FIELDS.iter().any(|f| f.id == id) { seen.push(id); }
+            }
+            *row = seen;
+        }
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    #[test]
+    fn sixteen_unique_pins_per_slot_survive_duplicate_and_excess_input() {
+        let mut panel = MainPanel::default();
+        for field in FIELDS.iter().take(MAX_PINS) {
+            assert!(panel.update(0, field, true));
+            assert!(!panel.update(0, field, true));
+        }
+        assert!(!panel.update(0, &FIELDS[MAX_PINS], true));
+        assert!(panel.update(1, &FIELDS[MAX_PINS], true));
+        assert!(panel.update(0, &FIELDS[1], false));
+        assert!(panel.update(0, &FIELDS[MAX_PINS], true));
+        panel.0[0].insert(0, "unrecognised".into());
+        panel.0[0].insert(2, FIELDS[0].id.into());
+        panel.0[0].push(FIELDS[1].id.into());
+        panel.sanitize();
+        assert_eq!(panel.count(0), MAX_PINS);
+        assert_eq!(panel.fields(0).last().unwrap().id, FIELDS[MAX_PINS].id);
+        assert_eq!(panel.count(1), 1);
+    }
 }

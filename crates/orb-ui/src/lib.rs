@@ -31,6 +31,7 @@ pub mod model;
 pub mod palette;
 pub mod session;
 pub mod settings;
+mod user_bank;
 pub mod shortcuts;
 pub mod sidechain;
 pub mod studio;

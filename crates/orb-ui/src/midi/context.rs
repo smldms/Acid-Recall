@@ -54,6 +54,7 @@ pub(super) enum Action {
     Learn(String),
     Remove(String),
     Range(String, ValueRange),
+    MainPanel(String, bool),
 }
 
 fn key() -> egui::Id {
@@ -83,6 +84,15 @@ pub(super) fn snapshot(ctx: &Context, config: &Config) {
     });
 }
 
+fn panel_key() -> egui::Id { egui::Id::unique("acid-main-panel-context") }
+
+pub(super) fn panel_snapshot(ctx: &Context, panel: &crate::studio::midi::acid::MainPanel) {
+    ctx.data_mut(|d| {
+        let saved = d.get_temp_mut_or_default::<crate::studio::midi::acid::MainPanel>(panel_key());
+        if saved != panel { saved.clone_from(panel); }
+    });
+}
+
 pub(crate) trait MidiMenu {
     fn midi_menu(self, ui: &mut Ui, id: &str) -> Self;
 }
@@ -98,6 +108,18 @@ impl MidiMenu for Response {
             if menu.button("MIDI LEARN...").clicked() {
                 queue(menu, Action::Learn(id.into()));
                 menu.close();
+            }
+            if let Some((row, field)) = crate::studio::midi::acid::target(id) {
+                use crate::studio::midi::acid::{MainPanel, MAX_PINS};
+                let (pinned, full) = menu.ctx().data(|d| d.get_temp::<MainPanel>(panel_key()))
+                    .map_or((false, false), |p| (p.has(row, field), p.count(row) >= MAX_PINS));
+                let label = if pinned { "Remove from Main Panel" } else { "Add to Main Panel" };
+                if menu.add_enabled(pinned || !full, egui::Button::new(label))
+                    .on_disabled_hover_text("All 16 positions are used. Remove a control to free one.")
+                    .clicked() {
+                    queue(menu, Action::MainPanel(id.into(), !pinned));
+                    menu.close();
+                }
             }
             let config = menu
                 .ctx()

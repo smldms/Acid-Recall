@@ -239,22 +239,7 @@ pub(crate) fn machine_power_button(
     .midi_menu(ui, id)
 }
 
-pub(crate) fn mix_knob(
-    ui: &mut Ui,
-    scale: f32,
-    id: &str,
-    label: &str,
-    rect: Rect,
-    position: &mut i32,
-) -> egui::Response {
-    let mut response = ui
-        .interact(rect, egui::Id::unique(("graphite-knob", id)), Sense::drag())
-        .midi_menu(ui, id);
-    let mut value = *position;
-    if response.dragged_by(egui::PointerButton::Primary) {
-        let delta = ui.input(|i| -i.pointer.delta().y * if i.modifiers.shift { 1.0 } else { 5.0 });
-        value = (value + delta.round() as i32).clamp(0, 1000);
-    }
+fn paint_mix_knob(ui: &Ui, scale: f32, rect: Rect, position: f32) {
     let r = rect.width() * 0.43;
     let center = Pos2::new(rect.center().x, rect.top() + rect.width() * 0.5);
     ui.painter()
@@ -274,14 +259,33 @@ pub(crate) fn mix_knob(
         Stroke::new(1.7 * scale, BORDER),
     ));
     ui.painter().add(egui::Shape::line(
-        arc(value as f32 / 1000.0),
+        arc(position),
         Stroke::new(1.7 * scale, ACID),
     ));
-    let angle = start + sweep * value as f32 / 1000.0;
+    let angle = start + sweep * position;
     ui.painter().line_segment(
         [point(angle, r * 0.25), point(angle, r * 0.60)],
         Stroke::new(2.0 * scale, INK),
     );
+}
+
+pub(crate) fn mix_knob(
+    ui: &mut Ui,
+    scale: f32,
+    id: &str,
+    label: &str,
+    rect: Rect,
+    position: &mut i32,
+) -> egui::Response {
+    let mut response = ui
+        .interact(rect, egui::Id::unique(("graphite-knob", id)), Sense::drag())
+        .midi_menu(ui, id);
+    let mut value = *position;
+    if response.dragged_by(egui::PointerButton::Primary) {
+        let delta = ui.input(|i| -i.pointer.delta().y * if i.modifiers.shift { 1.0 } else { 5.0 });
+        value = (value + delta.round() as i32).clamp(0, 1000);
+    }
+    paint_mix_knob(ui, scale, rect, value as f32 / 1000.0);
     if !label.is_empty() {
         ui.painter().text(
             Pos2::new(rect.center().x, rect.bottom() - 3.0 * scale),
@@ -462,28 +466,43 @@ impl App {
                         BORDER
                     },
                 );
-                let acid_slot = row < 2 && self.studio.settings.synth_slots[row].enabled;
-                let machine = if acid_slot {
-                    ["AcidSynth A", "AcidSynth B"][row]
-                } else {
-                    MACHINES[row]
-                };
-                rack.text(ui, 30.0, y + 19.0, 16.0, machine, INK);
                 if row < 2 {
-                    if button(
-                        ui, rack, rack.rect(140.0, y + 9.0, 73.0, 19.0),
-                        (row, "instrument"), if acid_slot { "TB-303" } else { "AcidSynth" }, false,
-                    ).on_hover_text("Switch instrument in this slot").clicked() {
-                        self.studio.settings.synth_slots[row].enabled = !acid_slot;
+                    let slot = &mut self.studio.settings.synth_slots[row];
+                    let letter = ["A", "B"][row];
+                    let mut changed = false;
+                    let tb = slot.tb_active();
+                    let tb_label = format!("TB {letter} {}", if tb { "ON" } else { "OFF" });
+                    if button(ui, rack, rack.rect(26.0, y + 8.0, 55.0, 22.0),
+                        (row, "activate-tb"), &tb_label, tb)
+                        .on_hover_text("Activate or mute this TB-303 layer").clicked() {
+                        slot.tb_enabled = Some(!tb);
+                        changed = true;
+                    }
+                    let syn_label = format!("SYN {letter} {}", if slot.enabled { "ON" } else { "OFF" });
+                    if button(ui, rack, rack.rect(84.0, y + 8.0, 63.0, 22.0),
+                        (row, "activate-synth"), &syn_label, slot.enabled)
+                        .on_hover_text("Activate or mute this AcidSynth layer").clicked() {
+                        slot.set_synth_active(!slot.enabled);
+                        changed = true;
+                    }
+                    let showing_synth = slot.editing_synth();
+                    if button(ui, rack, rack.rect(150.0, y + 8.0, 66.0, 22.0),
+                        (row, "instrument"), if showing_synth { "VIEW: SYN" } else { "VIEW: TB" }, false)
+                        .on_hover_text("Switch the editing panel between TB-303 and AcidSynth. Both layers keep their playback state.").clicked() {
+                        slot.edit_synth = Some(!showing_synth);
+                        changed = true;
+                    }
+                    if changed {
                         self.panel.focus = row;
                         self.studio.changed();
                         self.doc.modified = true;
                     }
                 } else {
+                    rack.text(ui, 30.0, y + 19.0, 16.0, MACHINES[row], INK);
                     rack.text(ui, 206.0, y + 19.0, 8.0, "RHYTHM COMPOSER", DIM);
                 }
                 self.rack_mixer(ui, rack, row, y);
-                if acid_slot {
+                if row < 2 && self.studio.settings.synth_slots[row].editing_synth() {
                     self.rack_acid_synth(ui, rack, row, y);
                     continue;
                 }
@@ -529,7 +548,7 @@ impl App {
                         "LINK A/B",
                         self.generator.options.link_tb,
                     )
-                    .on_hover_text("Link both slots. In a mixed rack, RND on a TB follows AcidSynth chords; RND on AcidSynth follows the TB lines.")
+                    .on_hover_text("Generate both TB lines and the active AcidSynth parts together.")
                     .clicked()
                     {
                         self.generator.options.link_tb = !self.generator.options.link_tb;
@@ -541,7 +560,7 @@ impl App {
         let chord_id = egui::Id::unique("acid-chord-editor");
         let chord_row = ui.ctx().data(|d| d.get_temp::<Option<usize>>(chord_id)).flatten();
         if let Some(row) = chord_row {
-            if row < 2 && self.studio.settings.synth_slots[row].enabled {
+            if row < 2 && self.studio.settings.synth_slots[row].editing_synth() {
                 self.acid_chord_editor(ui, row, chord_id);
             } else {
                 ui.ctx().data_mut(|d| d.insert_temp(chord_id, None::<usize>));
@@ -558,14 +577,12 @@ impl App {
         let linked = row < 2 && self.generator.options.link_tb;
         let (label, tip) = if row >= 2 {
             ("RND", "Generate a drum pattern.")
-        } else if slots[row].enabled && linked {
-            ("RND CHORDS", "Build chords from TB A and B. Visible TB lines stay as played. Hidden TB lines follow the new chords.")
-        } else if slots[row].enabled {
-            ("RND CHORDS", "Generate chords for this AcidSynth. Enable LINK A/B to follow the TB lines.")
-        } else if linked && slots[1-row].enabled {
-            ("RND TBs", "Generate TB A and B from the current AcidSynth chords.")
+        } else if linked && (slots[row].editing_synth() || slots.iter().any(|s| s.enabled)) {
+            ("RND LINK", "Generate both TB patterns and the active AcidSynth chords together.")
         } else if linked {
             ("RND TBs", "Generate a linked pair of TB patterns.")
+        } else if slots[row].editing_synth() {
+            ("RND CHORDS", "Generate chords for the AcidSynth shown here.")
         } else {
             ("RND", "Generate a pattern for this TB. Enable LINK A/B for linked generation.")
         };
@@ -819,9 +836,10 @@ impl App {
                 rack,
                 rack.rect(117.0, y + 123.0, 89.0, 21.0),
                 (row, "enable"),
-                "ENABLED",
+                "TB SEQ",
                 self.panel.rows[row].enabled,
             )
+            .on_hover_text("Native TB pattern playback switch")
             .clicked()
             {
                 self.panel.press(&format!("{section}.on"), 0.0);
@@ -1374,7 +1392,7 @@ impl App {
         let Some(row) = ui.ctx().data(|d| d.get_temp::<Option<usize>>(id)).flatten() else {
             return;
         };
-        if row < 2 && self.studio.settings.synth_slots[row].enabled {
+        if row < 2 && self.studio.settings.synth_slots[row].editing_synth() {
             self.acid_editor(ui, row, id);
             return;
         }

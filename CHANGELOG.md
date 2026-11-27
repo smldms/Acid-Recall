@@ -1,5 +1,15 @@
 # ACID RECALL changelog
 
+## 1.1.0 laptop compatibility test — 27 November 2026
+
+- Windows selects DX12 before graphics instance creation, avoiding Vulkan initialization by default.
+- Added `--graphics dx12|vulkan|auto`, with command-line priority over valid `WGPU_BACKEND` overrides.
+- Preserved original non-Windows graphics defaults and all audio, MIDI and project behavior.
+- Added a graphics startup guide and a separate test download; stable 1.0 remains available.
+- The reported Windows 11 Intel laptop still needs to confirm the fix on its own driver.
+
+[1.1 test notes](docs/releases/1.1.0.md) · [Graphics startup guide](docs/graphics-startup.md)
+
 ## 1.0.0 — 22 November 2026
 
 First stable ACID RECALL release, built on OpenRB-338.
